@@ -113,7 +113,7 @@ class SystemLNG_PBU:
                 #PBU spremnik 1
                 T_liq_t = self.tank.states.liquid.temperature
                 self.pbu.update_states(T_liq_t, p_tank, temperature_glycol[i], self.protok_pbu)
-                if tank_vol_ratio > 0.04:
+                if tank_vol_ratio > 0.05:
                     pbu_flow = self.pbu.states.evap_lng.mol_flow
                 else:
                     pbu_flow = 0.0
