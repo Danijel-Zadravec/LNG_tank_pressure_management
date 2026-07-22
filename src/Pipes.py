@@ -2,12 +2,12 @@
 """
 """
 import numpy as np
-import scipy.optimize as opt
 import time
 
 import src.properties.glycol_props as glyc
 from src.properties.liq_props_lowlev import MetLiq
 from src.properties.vap_props_lowlev import MetVap
+from src.optim_utils import robust_root_scalar
 
 M=16.04
 met_liq = MetLiq()
@@ -127,8 +127,7 @@ class Pipe:
         self.calc_speed()
         speed =self.states.speed
 
-        friction_coeff_rez = opt.minimize_scalar(colebrook, bounds=(0.0000001, 1.0), args=(roughness, d, speed, ro, mu), method='bounded')
-        friction_coeff = friction_coeff_rez.x
+        friction_coeff = friction_factor_haaland(roughness, d, speed, ro, mu)
         self.states.friction_coeff = friction_coeff
         #Darcy weisbach
         dp = friction_coeff * (length * ro / 2) * speed** 2 / d
@@ -146,8 +145,7 @@ class Pipe:
         mu = self.states.mu
         self.calc_speed()
         speed =self.states.speed
-        friction_coeff_rez = opt.minimize_scalar(colebrook, bounds=(0.0000001, 1.0), args=(roughness, d, speed, ro, mu), method='bounded')
-        friction_coeff = friction_coeff_rez.x
+        friction_coeff = friction_factor_haaland(roughness, d, speed, ro, mu)
         self.states.friction_coeff = friction_coeff
         #Darcy weisbach
         dp = friction_coeff * (length * ro / 2) * speed** 2 / d
@@ -163,9 +161,9 @@ class Pipe:
         h_in = calc_h(T_in, p, medium)
         T_env = self.params.T_env
 
-        T_out_opt = opt.minimize_scalar(T_out_fun, bounds=(T_in, T_in+3.0),
-                                    args=(T_in, T_env, p, h_in, k, A_wall, flow, medium), method='bounded')
-        T_out = T_out_opt.x
+        prev_T_out = self.states.T_out if self.states.T_out else None
+        args = (T_in, T_env, p, h_in, k, A_wall, flow, medium)
+        T_out = robust_root_scalar(lambda x: T_out_residual(x, *args), T_in, T_in+3.0, prev_guess=prev_T_out)
         h_out = calc_h(T_out, p, medium)
         Fi = flow * (h_out - h_in)
         self.states.h_in = h_in
@@ -182,9 +180,9 @@ class Pipe:
         T_out = self.states.T_out
         T_env = self.params.T_env
         h_out = calc_h(T_out, p, medium)
-        T_in_opt = opt.minimize_scalar(T_in_fun, bounds=(T_out-5.0, T_out+5.0),
-                                    args=(T_out, T_env, p, h_out, k, A_wall, flow, medium), method='bounded')
-        T_in = T_in_opt.x
+        prev_T_in = self.states.T_in if self.states.T_in else None
+        args = (T_out, T_env, p, h_out, k, A_wall, flow, medium)
+        T_in = robust_root_scalar(lambda x: T_in_residual(x, *args), T_out-5.0, T_out+5.0, prev_guess=prev_T_in)
         h_in = calc_h(T_in, p, medium)
         Fi = flow * (h_out - h_in)
         self.states.h_in = h_in
@@ -240,11 +238,30 @@ def colebrook(f, roughness, d, speed, ro, mu):
     '''
     Proračun koeficijenta trenja prema colebrookovoj jednadžbi
     https://www.engineeringtoolbox.com/colebrook-equation-d_1031.html
+    Kept for validation/testing against the explicit Haaland approximation
+    used by friction_factor_haaland() in the hot path.
     '''
     Re = speed * d * ro / mu
     diff = f**(-0.5) + 2 * np.log10( roughness / (d*3.72) + 2.51 / (Re * f**0.5))
     diff_sq = diff**2
     return diff_sq
+
+
+def friction_factor_haaland(roughness, d, speed, ro, mu):
+    '''
+    Explicit (non-iterative) Darcy friction factor approximation, replacing
+    the per-step Colebrook minimize_scalar solve. Uses the laminar formula
+    below Re=2300 and the Haaland (1983) approximation otherwise, which
+    deviates from the exact Colebrook equation by <~2% over the normal
+    turbulent range.
+    '''
+    Re = speed * d * ro / mu
+    if Re <= 0.0:
+        return 0.0
+    if Re < 2300.0:
+        return 64.0 / Re
+    inv_sqrt_f = -1.8 * np.log10((roughness / (3.7 * d))**1.11 + 6.9 / Re)
+    return inv_sqrt_f ** -2.0
 
 
 def calc_h(T, p, medium):
@@ -278,3 +295,21 @@ def T_in_fun(T_in, T_out, T_env, p, h_out, k, A, flow, medium):
     Fi_h = flow * (h_out - h_in)
     res = (Fi_T - Fi_h) **2
     return res
+
+
+def T_out_residual(T_out, T_in, T_env, p, h_in, k, A, flow, medium):
+    '''Raw (non-squared) energy-balance residual, for use with brentq.'''
+    T_mean = (T_in + T_out) / 2.0
+    Fi_T = k * A * (T_env - T_mean)
+    h_out = calc_h(T_out, p, medium)
+    Fi_h = flow * (h_out - h_in)
+    return Fi_T - Fi_h
+
+
+def T_in_residual(T_in, T_out, T_env, p, h_out, k, A, flow, medium):
+    '''Raw (non-squared) energy-balance residual, for use with brentq.'''
+    T_mean = (T_in + T_out) / 2.0
+    Fi_T = k * A * (T_env - T_mean)
+    h_in = calc_h(T_in, p, medium)
+    Fi_h = flow * (h_out - h_in)
+    return Fi_T - Fi_h

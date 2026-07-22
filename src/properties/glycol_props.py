@@ -25,7 +25,7 @@ def density(T):
         gustoca [kg/m^3]
 
     '''
-    ro = CP.PropsSI('D', 'T', T, 'Q', 0, fluid)
+    ro = CP.PropsSI('D', 'T', T, 'P', 100000.0, fluid)
     return ro
 
 
@@ -42,7 +42,3 @@ def cp(T, p):
 def enthalpy(T):
     entalpija = CP.PropsSI('H', 'T', T, 'P', 100000.0, fluid) #J/kK
     return entalpija
-
-
-
-density(300)

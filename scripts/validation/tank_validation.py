@@ -41,7 +41,8 @@ pressures=pressures[1:]
 
 
 # Import the CSV file
-data = pd.read_csv('scripts\\validation\\validation_data.csv')
+VALIDATION_DIR = Path(__file__).resolve().parent
+data = pd.read_csv(VALIDATION_DIR / 'validation_data.csv')
 
 
 ts = data["t"].values
@@ -91,8 +92,8 @@ ax.legend(loc='best', frameon=True, shadow=True, fontsize=11)
 plt.tight_layout()
 
 # Save at 600 dpi
-plt.savefig('scripts\\validation\\tank_pressure_comparison.png', dpi=600, bbox_inches='tight')
-plt.savefig('scripts\\validation\\tank_pressure_comparison.pdf', dpi=600, bbox_inches='tight')
+plt.savefig(VALIDATION_DIR / 'tank_pressure_comparison.png', dpi=600, bbox_inches='tight')
+plt.savefig(VALIDATION_DIR / 'tank_pressure_comparison.pdf', dpi=600, bbox_inches='tight')
 print("Figure saved as: tank_pressure_comparison.png and tank_pressure_comparison.pdf")
 plt.show()
 

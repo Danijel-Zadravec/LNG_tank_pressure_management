@@ -14,6 +14,45 @@ met_liq = MetLiq()
 met_vap = MetVap()
 met_vap_slow = MetVap_slow()
 met_eq = MetEq()
+
+
+def angle_func(alpha, const):
+    er = alpha - np.sin(alpha) - const
+    error = er**2
+    return error
+
+
+def _build_angle_table(n=2001):
+    '''
+    Precompute the circular-segment angle as a function of `const` once at
+    import time. `const = alpha - sin(alpha)` is a fixed, tank-diameter
+    independent, strictly increasing relationship over alpha in [0, 2*pi],
+    const in [0, 2*pi]. Solving it once with an exact root-finder and then
+    doing O(1) interpolation every step replaces a per-step
+    `minimize_scalar` solve with a table lookup.
+    '''
+    const_grid = np.linspace(0.0, 2.0 * np.pi, n)
+    angle_grid = np.empty(n)
+    angle_grid[0] = 0.0
+    angle_grid[-1] = 2.0 * np.pi
+    for i in range(1, n - 1):
+        c = const_grid[i]
+        angle_grid[i] = opt.brentq(lambda a, c=c: a - np.sin(a) - c, 0.0, 2.0 * np.pi)
+    return const_grid, angle_grid
+
+
+_ANGLE_TABLE_CONST, _ANGLE_TABLE_ANGLE = _build_angle_table()
+
+
+def solve_angle_exact(const):
+    '''Exact (slow) solve, kept for validation/testing against the lookup table.'''
+    rez = opt.minimize_scalar(angle_func, bounds=(0, 2 * np.pi), args=(const,), method='bounded')
+    return rez.x
+
+
+def solve_angle(const):
+    '''Fast O(1) lookup replacing the per-step minimize_scalar solve.'''
+    return np.interp(const, _ANGLE_TABLE_CONST, _ANGLE_TABLE_ANGLE)
 class Tank_params():
     '''
     Parametri spremnika
@@ -192,8 +231,7 @@ class Tank():
         radius = d/2
         rad_sq = radius**2
         const = 2 * area_vap / rad_sq
-        rez = opt.minimize_scalar(angle_func, bounds=(0, 2*np.pi), args=(const), method='bounded')
-        angle = rez.x
+        angle = solve_angle(const)
         self.states.common.angle = angle
         segment = 2.0 * np.sin(angle/2.0) * radius
         height = np.cos(angle/2.0) * radius + radius
@@ -558,11 +596,6 @@ class Tank():
         self.tank_areas()
         self.states.common.W = W
         self.save.save_states(self.states) # spremi stanja
-
-def angle_func(alpha, const):
-    er = alpha - np.sin(alpha) - const
-    error = er**2
-    return error
 
 #%%
 if __name__ == "__main__":

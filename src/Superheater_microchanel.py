@@ -6,6 +6,7 @@ import scipy.optimize as opt
 from src.properties.glycol_props_lowlev import  GlycolClass
 from src.properties.vap_props_lowlev import MetVap, MetVap_slow
 from src.rezimi import Rezimi
+from src.optim_utils import robust_root_scalar
 
 met_vap = MetVap()
 glyc = GlycolClass(0.5) #50 % maseni udio etilen glikola
@@ -194,6 +195,7 @@ class HeatExchanger:
 
     def update_states(self, lng_flow, lng_T_in, lng_T_out0, lng_p, glycol_flow, glycol_T_in):
         if (lng_flow > 0.0):
+            prev_T_out = self.states.lng.T_out # previous timestep's converged solution, for warm start
             self.states.lng.T_in = lng_T_in
             self.states.lng.p = lng_p
             met_vap.set_pT(lng_p, lng_T_in)
@@ -207,7 +209,7 @@ class HeatExchanger:
             self.states.glycol.mas_flow = glycol_flow
             self.states.glycol.T_in = glycol_T_in
             #self.calculate_HE()
-            self.calc_HE_opt()
+            self.calc_HE_opt(prev_T_out)
             self.save.save_states(self.states) #spremanje pocetnih stanja
 
             # #self.states.glycol.h_mas_in =  glyc.enthalpy(glycol_T_in)
@@ -218,23 +220,25 @@ class HeatExchanger:
         else:
             assert False, "superh neg flow"
 
-    def calc_HE_opt(self):
+    def calc_HE_opt(self, prev_T_out=None):
         T_glycol_in = self.states.glycol.T_in
         T_lng_in = self.states.lng.T_in
-        opt_rez = opt.minimize_scalar(self.HE_opt, bounds=(T_lng_in+0.00001, T_glycol_in-0.0000001), method='bounded')
-        T_lng_out = opt_rez.x
+        lo, hi = T_lng_in+0.00001, T_glycol_in-0.0000001
+        T_lng_out = robust_root_scalar(self.HE_residual, lo, hi, prev_guess=prev_T_out)
+        self.HE_residual(T_lng_out) # ensure states reflect the exact solved point
         p=self.states.lng.p
         met_vap.set_pT(p, T_lng_out)
         heat_flow = self.states.calc_heat_flow()
         self.states.common.heat_flow = heat_flow
         self.calc_T_out_glyc()
         #print('')
-        #print('lng T_out: ' + str(opt_rez.x))
+        #print('lng T_out: ' + str(T_lng_out))
         #print('glyc T_out: ' + str(self.states.glycol.T_out))
 
 
 
-    def HE_opt(self, T_out):
+    def HE_residual(self, T_out):
+        '''Raw (non-squared) energy-balance residual, for use with brentq.'''
         self.states.lng.T_out = T_out
         p=self.states.lng.p
         met_vap.set_pT(p, T_out)
@@ -247,7 +251,10 @@ class HeatExchanger:
         self.calc_alfa_lng()
         self.LMTD_heat_flow()
         heat_flow_LMTD = self.states.common.heat_flow_LMTD
-        return(heat_flow-heat_flow_LMTD)**2
+        return heat_flow-heat_flow_LMTD
+
+    def HE_opt(self, T_out):
+        return self.HE_residual(T_out) ** 2
 
 
     def calculate_HE(self):

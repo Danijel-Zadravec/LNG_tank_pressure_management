@@ -92,7 +92,13 @@ class SystemLNG_Compressor:
                     tank_vap_flow = 0.0
 
                 T_c1_in = self.tank.states.vapor.temperature
-                self.compressor.calculate(T_c1_in, p_tank, pressure_evap)
+                if tank_vap_flow > 0.0:
+                    self.compressor.calculate(T_c1_in, p_tank, pressure_evap)
+                else:
+                    # Compressor idle - skip the isentropic-path calculation.
+                    # Mixer already zero-weights this stream when qn2==0.0,
+                    # so the stale T_out from ne_radi() has no effect downstream.
+                    self.compressor.ne_radi()
 
                 tank_liq_flow = demand[i] - tank_vap_flow
 

@@ -8,6 +8,7 @@ from src.properties.liq_props_lowlev import MetLiq
 from src.properties.vap_props_lowlev import MetVap
 from src.properties.glycol_props_lowlev import  GlycolClass
 from src.rezimi import Rezimi
+from src.optim_utils import robust_root_scalar
 
 met_liq = MetLiq()
 met_vap = MetVap()
@@ -413,7 +414,11 @@ class Evaporator():
         h = self.params.h
         evap_frac = self.states.evap_com.A_fraction
         lmbd = self.states.evap_lng.l
-        alfa = 10000.0
+        # Warm-start the alpha fixed-point iteration from the previous
+        # timestep's converged value (it changes little between steps),
+        # instead of always restarting from a fixed 10000.0 guess.
+        alfa_prev_step = self.states.evap_lng.alfa
+        alfa = alfa_prev_step if alfa_prev_step > 0.0 else 10000.0
         alfa_prev = 0.0
         i=0
         while abs(alfa-alfa_prev) > 1.0:
@@ -526,7 +531,8 @@ class Evaporator():
         Fi_LMTD = LMTD/R_sum
         self.states.evap_com.heat_flow_LMTD = Fi_LMTD
 
-    def T_lng_out_fun(self, T_lng_out):
+    def T_lng_out_residual(self, T_lng_out):
+        '''Raw (non-squared) energy-balance residual, for use with brentq.'''
         self.states.superh_lng.T_out = T_lng_out
         p_lng = self.states.evap_lng.p
         met_vap.set_pT(p_lng, T_lng_out)
@@ -549,7 +555,10 @@ class Evaporator():
         self.calc_evap_LMTD_heat_flow()
         Fi = self.states.evap_com.heat_flow
         Fi_LMTD = self.states.evap_com.heat_flow_LMTD
-        return (Fi-Fi_LMTD)**2
+        return Fi-Fi_LMTD
+
+    def T_lng_out_fun(self, T_lng_out):
+        return self.T_lng_out_residual(T_lng_out) ** 2
 
 
 
@@ -598,9 +607,10 @@ class Evaporator():
             self.states.evap_glyc.mas_flow = qm_glyc
 
 
-            opt_rez = opt.minimize_scalar(self.T_lng_out_fun, bounds=(T_sat+0.00001, T_glyc_in-0.0000001), method='bounded')
-            #T_superheating = opt_rez.x
-            #print(T_superheating)
+            prev_T_out = self.states.superh_lng.T_out
+            lo, hi = T_sat+0.00001, T_glyc_in-0.0000001
+            T_superheating = robust_root_scalar(self.T_lng_out_residual, lo, hi, prev_guess=prev_T_out)
+            self.T_lng_out_residual(T_superheating) # ensure states reflect the exact solved point
             self.save.save_states(self.states) #spremanje pocetnih stanja
         elif (qn_lng == 0.0):
             self.no_flow(T_lng_in, p_lng, T_glyc_in)

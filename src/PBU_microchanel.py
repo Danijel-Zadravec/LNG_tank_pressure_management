@@ -2,12 +2,12 @@
 """
 """
 import numpy as np
-import scipy.optimize as opt
 
 from src.properties.liq_props_lowlev import MetLiq
 from src.properties.vap_props_lowlev import MetVap
 from src.properties.glycol_props_lowlev import  GlycolClass
 from src.rezimi import Rezimi
+from src.optim_utils import robust_root_scalar
 
 met_liq = MetLiq()
 met_vap = MetVap()
@@ -322,7 +322,8 @@ class PBU():
         Fi_LMTD = LMTD/R_sum
         self.states.evap_com.heat_flow_LMTD = Fi_LMTD
 
-    def calc_lng_flow(self, qn_lng):
+    def calc_lng_flow_residual(self, qn_lng):
+        '''Raw (non-squared) energy-balance residual, for use with brentq.'''
         self.states.evap_lng.mol_flow = qn_lng
         mas_flow_lng = qn_lng * self.states.evap_lng.M
         self.states.evap_lng.mas_flow = mas_flow_lng
@@ -335,7 +336,10 @@ class PBU():
         self.calc_evap_LMTD_heat_flow()
         heat_flow = self.states.evap_com.heat_flow
         heat_flowLMTD = self.states.evap_com.heat_flow_LMTD
-        return (heat_flow-heat_flowLMTD)**2
+        return heat_flow-heat_flowLMTD
+
+    def calc_lng_flow(self, qn_lng):
+        return self.calc_lng_flow_residual(qn_lng) ** 2
 
 
     def ne_radi(self):
@@ -383,6 +387,7 @@ class PBU():
 
     def update_states(self, T_lng_in, p_lng, T_glyc_in, qm_glyc):
         #lng evaporation
+        prev_qn_lng = self.states.evap_lng.mol_flow # previous timestep's converged solution, for warm start
         self.states.evap_lng.T_in = T_lng_in
         self.states.evap_lng.p = p_lng
         met_liq.set_p(p_lng)
@@ -408,8 +413,8 @@ class PBU():
 
         self.states.evap_glyc.T_in = T_glyc_in
         self.states.evap_glyc.mas_flow = qm_glyc
-        opt_rez = opt.minimize_scalar(self.calc_lng_flow, bounds=(0.00001, 0.05), method='bounded')
-        qn_lng = opt_rez.x
+        qn_lng = robust_root_scalar(self.calc_lng_flow_residual, 0.00001, 0.05, prev_guess=prev_qn_lng)
+        self.calc_lng_flow_residual(qn_lng) # ensure states reflect the exact solved point
         self.states.evap_lng.mol_flow = qn_lng
         self.states.evap_lng.mas_flow = qn_lng * self.states.evap_lng.M
 
