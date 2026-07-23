@@ -18,7 +18,9 @@ For every case the following outputs are reported:
     - time to minimum heel (days), time to MAWP (days)
     - maximum tank pressure (bar), pressure at termination (bar), margin to MAWP (bar)
     - total BOG removed / BOG used as fuel / excess BOG requiring management (kg)
-    - pump / compressor / total mechanical energy (kWh)
+    - pump / compressor / total and specific mechanical energy
+    - PBU, evaporator and superheater thermal energy (kWh)
+    - mode-separated BOG removal for all three FGSS configurations
 
 All of the above (except `bog_excess_kg` for the PBU system, and the final
 rows themselves) are truncated to the first-occurring "termination" event
@@ -33,8 +35,8 @@ bog_excess_kg (cumulative) -- is saved to its own CSV under
 results/sensitivity/timeprofiles/, for raw-data inspection / diagnosing any
 individual run (see `save_time_profile`).
 
-The three base cases (PBU_dual.py, Pump_dual.py, Compressor_dual.py) are
-reused unmodified: the tank insulation / initial filling / ambient
+The three configuration factories used by PBU_dual.py, Pump_dual.py, and
+Compressor_dual.py are reused: the tank insulation / initial filling / ambient
 temperature parameters are varied by monkey-patching the corresponding
 module-level globals in the `configurations.system_*` modules right before
 calling their `create_system_*` factory function (these functions read the
@@ -159,7 +161,7 @@ PARAM_META = OrderedDict([
 METRICS_META = OrderedDict([
     ('time_to_min_heel_days', 'Time to minimum heel (days)'),
     ('max_pressure_bar', 'Maximum tank pressure (bar)'),
-    ('pressure_at_termination_bar', 'Pressure at termination (bar)'),
+    ('pressure_margin_to_mawp_bar', 'Minimum pressure margin to MAWP (bar)'),
     ('bog_excess_kg', 'Excess BOG requiring management (kg)'),
     ('bog_used_as_fuel_kg', 'BOG used as fuel (kg)'),
     ('mechanical_energy_kWh', 'Mechanical (pump + compressor) energy (kWh)'),
@@ -216,92 +218,400 @@ for _spec in SYSTEM_SPECS.values():
 # ---------------------------------------------------------------------------
 # Simulation + metric extraction
 # ---------------------------------------------------------------------------
+def _get_positive_power_W(res, power_col, active_mask=None):
+    """Return non-negative thermal power, zeroing inactive rows."""
+    if power_col not in res.columns:
+        raise KeyError(f'Missing thermal-power column: {power_col}')
+
+    power_W = np.clip(
+        res[power_col].to_numpy(dtype=float),
+        0.0,
+        None,
+    )
+
+    if active_mask is not None:
+        active_mask = np.asarray(active_mask, dtype=bool)
+        if len(active_mask) != len(power_W):
+            raise RuntimeError(
+                f'Thermal-power mask length mismatch for {power_col}: '
+                f'{len(active_mask)} versus {len(power_W)}.'
+            )
+        power_W = np.where(active_mask, power_W, 0.0)
+
+    return power_W
+
+
+def _thermal_power_arrays(
+    res,
+    evaporator_flow_kmol_s,
+    superheater_flow_kmol_s,
+):
+    """Extract PBU, evaporator and superheater thermal powers in W."""
+    n = len(res)
+
+    evaporator_active = (
+        np.asarray(evaporator_flow_kmol_s, dtype=float) > 0.0
+    )
+    superheater_active = (
+        np.asarray(superheater_flow_kmol_s, dtype=float) > 0.0
+    )
+
+    if ('pbu common', 'heat_flow') in res.columns:
+        if ('pbu lng', 'mol_flow') not in res.columns:
+            raise KeyError(
+                "Missing PBU flow column: ('pbu lng', 'mol_flow')"
+            )
+        pbu_active = (
+            res[
+                ('pbu lng', 'mol_flow')
+            ].to_numpy(dtype=float)
+            > 0.0
+        )
+        pbu_power_W = _get_positive_power_W(
+            res,
+            ('pbu common', 'heat_flow'),
+            pbu_active,
+        )
+    else:
+        pbu_power_W = np.zeros(n)
+
+    evaporator_evap_power_W = _get_positive_power_W(
+        res,
+        ('evap comm evap', 'heat_flow'),
+        evaporator_active,
+    )
+    evaporator_superheat_power_W = _get_positive_power_W(
+        res,
+        ('evap comm superh', 'heat_flow'),
+        evaporator_active,
+    )
+    evaporator_power_W = (
+        evaporator_evap_power_W
+        + evaporator_superheat_power_W
+    )
+
+    superheater_power_W = _get_positive_power_W(
+        res,
+        ('super comm', 'heat_flow'),
+        superheater_active,
+    )
+
+    return {
+        'pbu_power_W': pbu_power_W,
+        'evaporator_evap_power_W': evaporator_evap_power_W,
+        'evaporator_superheat_power_W':
+            evaporator_superheat_power_W,
+        'evaporator_power_W': evaporator_power_W,
+        'superheater_power_W': superheater_power_W,
+    }
+
+
+def _align_engine_demand_to_results(
+    engine,
+    time_s,
+    system_key,
+):
+    """
+    Align a Pump/Compressor engine-demand profile with the saved result rows.
+
+    Pump and Compressor simulations can stop when the minimum heel is reached,
+    so their result arrays may contain only the initial prefix of the generated
+    30-day engine profile. The saved result rows remain one-to-one aligned with
+    that prefix.
+    """
+    demand_arr = np.asarray(engine.demand, dtype=float)
+    engine_time_s = np.asarray(engine.times, dtype=float)
+    result_time_s = np.asarray(time_s, dtype=float)
+    n = len(result_time_s)
+
+    if n > len(demand_arr) or n > len(engine_time_s):
+        raise RuntimeError(
+            f'{system_key}: result profile is longer than the available '
+            f'engine profile: {n} result rows, '
+            f'{len(demand_arr)} demand values and '
+            f'{len(engine_time_s)} engine-time values.'
+        )
+
+    expected_time_s = engine_time_s[:n]
+    if not np.allclose(
+        result_time_s,
+        expected_time_s,
+        rtol=0.0,
+        atol=1.0e-9,
+    ):
+        max_error_s = float(
+            np.max(np.abs(result_time_s - expected_time_s))
+        )
+        raise RuntimeError(
+            f'{system_key}: result times are not aligned with the '
+            f'initial engine-profile segment; maximum time difference '
+            f'is {max_error_s:.6g} s.'
+        )
+
+    demand_aligned = np.zeros(n)
+    if n > 1:
+        demand_aligned[1:] = demand_arr[1:n]
+
+    return demand_aligned
+
 def save_time_profile(system, engine, system_key, out_csv):
-    '''
-    Saves the FULL (untruncated) time profile of a finished system.calculate()
-    run to `out_csv`, with columns:
-        time_s, day, pressure_bar, fill_pct,
-        liquid_flow_kg_per_h, vapor_flow_kg_per_h, bog_excess_kg
-
-    Sign convention: liquid_flow_kg_per_h / vapor_flow_kg_per_h are positive
-    when LNG/BOG is being withdrawn from the tank (i.e. the negative of the
-    raw ('tank liq'|'tank vap','flow') columns, which are positive when mass
-    is added to the tank).
-
-    `bog_excess_kg` is the CUMULATIVE excess BOG (kg) that could not be
-    absorbed as fuel, reconstructed at every row from BOG-removed vs. engine
-    demand (same criterion the model itself uses for system.BOG_excess). This
-    exact reconstruction relies on results rows being 1:1 aligned with
-    engine.demand, which holds for Pump/Compressor but NOT for PBU (its
-    internal low-pressure pressurization-stall loop inserts extra rows -- see
-    `not_working_times`); for PBU this column is therefore reported as NaN.
-    '''
+    """Save the complete, untruncated time profile of one simulation."""
     res = system.results
     time_s = res[(' ', 'time')].to_numpy(dtype=float)
     day = time_s / 86400.0
-    pressure_bar = res[('tank com', 'pressure')].to_numpy(dtype=float) / 1.0e5
-    fill_pct = res[('tank liq', 'vol_ratio')].to_numpy(dtype=float) * 100.0
-    liquid_flow_kg_per_h = -res[('tank liq', 'flow')].to_numpy(dtype=float) * M * 3600.0
-    vapor_flow_kg_per_h = -res[('tank vap', 'flow')].to_numpy(dtype=float) * M * 3600.0
-    liquid_temperature_K = res[('tank liq', 'temperature')].to_numpy(dtype=float)
-    vapor_temperature_K = res[('tank vap', 'temperature')].to_numpy(dtype=float)
-    saturation_temperature_K = res[('tank com', 'T_sat')].to_numpy(dtype=float)
-    vapor_quantity_kmol = res[('tank vap', 'quantity')].to_numpy(dtype=float)
-    liquid_quantity_kmol = res[('tank liq', 'quantity')].to_numpy(dtype=float)
-    evaporation_per_step_kmol = res[('tank com', 'evaporation')].to_numpy(dtype=float)
-    liquid_heat_gain_kJ = res[('tank liq', 'surf_heat_flow')].to_numpy(dtype=float)
-    vapor_heat_gain_kJ = res[('tank vap', 'surf_heat_flow')].to_numpy(dtype=float)
-    liquid_superheat_K = (liquid_temperature_K - saturation_temperature_K)
+    pressure_bar = (
+        res[('tank com', 'pressure')].to_numpy(dtype=float)
+        / 1.0e5
+    )
+    fill_pct = (
+        res[('tank liq', 'vol_ratio')].to_numpy(dtype=float)
+        * 100.0
+    )
+    liquid_flow_kg_per_h = (
+        -res[('tank liq', 'flow')].to_numpy(dtype=float)
+        * M * 3600.0
+    )
+    net_tank_vapor_flow_kg_per_h = (
+        -res[('tank vap', 'flow')].to_numpy(dtype=float)
+        * M * 3600.0
+    )
+    liquid_temperature_K = (
+        res[('tank liq', 'temperature')].to_numpy(dtype=float)
+    )
+    vapor_temperature_K = (
+        res[('tank vap', 'temperature')].to_numpy(dtype=float)
+    )
+    saturation_temperature_K = (
+        res[('tank com', 'T_sat')].to_numpy(dtype=float)
+    )
+    vapor_quantity_kmol = (
+        res[('tank vap', 'quantity')].to_numpy(dtype=float)
+    )
+    liquid_quantity_kmol = (
+        res[('tank liq', 'quantity')].to_numpy(dtype=float)
+    )
+    net_phase_change_kmol_per_step = (
+        res[('tank com', 'evaporation')].to_numpy(dtype=float)
+    )
+    liquid_heat_gain_kJ_per_step = (
+        res[('tank liq', 'surf_heat_flow')].to_numpy(dtype=float)
+    )
+    vapor_heat_gain_kJ_per_step = (
+        res[('tank vap', 'surf_heat_flow')].to_numpy(dtype=float)
+    )
+    liquid_superheat_K = (
+        liquid_temperature_K - saturation_temperature_K
+    )
+
     n = len(time_s)
+    time_step_s = np.diff(time_s, prepend=time_s[0])
+
     if system_key == 'PBU':
-        bog_excess_kg = np.full(n, np.nan)
-    else:
-        if ('BOG valve 1', 'gas_mol_flow') in res.columns:
-            bog_removed_flow = np.clip(res[('BOG valve 1', 'gas_mol_flow')].to_numpy(dtype=float), 0.0, None)
-        else:
-            bog_removed_flow = np.clip(-res[('tank vap', 'flow')].to_numpy(dtype=float), 0.0, None)
-        demand_arr = np.asarray(engine.demand, dtype=float)
-        demand_aligned = np.zeros(n)
-        demand_aligned[1:n] = demand_arr[1:n]
-        if len(demand_arr) != n:
-            raise RuntimeError(
-                f'{system_key}: results and engine demand are not aligned: '
-                f'{n} result rows versus {len(demand_arr)} demand values.'
+        required_operation_columns = [
+            ('operation', 'engine_demand_kmol_s'),
+            ('operation', 'fuel_supplied_kmol_s'),
+            ('operation', 'liquid_fuel_kmol_s'),
+            ('operation', 'fuel_mode'),
+            ('operation', 'system_mode'),
+            ('operation', 'pbu_active'),
+            ('operation', 'bog_valve_active'),
+            ('operation', 'bog_removed_kmol_s'),
+            ('operation', 'bog_used_kmol_s'),
+            ('operation', 'bog_excess_kmol_s'),
+            ('operation', 'cumulative_bog_excess_kmol'),
+        ]
+        missing = [
+            col for col in required_operation_columns
+            if col not in res.columns
+        ]
+        if missing:
+            raise KeyError(
+                f'PBU operating-log columns are missing: {missing}'
             )
-        engine_demand_kg_per_h = demand_aligned * M * 3600.0
-        conventional_fuel = demand_aligned <= 0.0
-        bog_removed_kg_per_h = bog_removed_flow * M * 3600.0
-        cumulative_bog_removed_kg = (
-            np.cumsum(bog_removed_flow) * DT * M
+
+        engine_demand = res[
+            ('operation', 'engine_demand_kmol_s')
+        ].to_numpy(dtype=float)
+        fuel_supplied = res[
+            ('operation', 'fuel_supplied_kmol_s')
+        ].to_numpy(dtype=float)
+        evaporator_flow = res[
+            ('operation', 'liquid_fuel_kmol_s')
+        ].to_numpy(dtype=float)
+        fuel_mode = res[
+            ('operation', 'fuel_mode')
+        ].astype(str).to_numpy()
+        system_mode = res[
+            ('operation', 'system_mode')
+        ].astype(str).to_numpy()
+        pbu_active = res[
+            ('operation', 'pbu_active')
+        ].astype(bool).to_numpy()
+        bog_valve_active = res[
+            ('operation', 'bog_valve_active')
+        ].astype(bool).to_numpy()
+        bog_removed_flow = res[
+            ('operation', 'bog_removed_kmol_s')
+        ].to_numpy(dtype=float)
+        bog_used_flow = res[
+            ('operation', 'bog_used_kmol_s')
+        ].to_numpy(dtype=float)
+        bog_excess_flow = res[
+            ('operation', 'bog_excess_kmol_s')
+        ].to_numpy(dtype=float)
+        cumulative_bog_excess_kg = (
+            res[
+                ('operation', 'cumulative_bog_excess_kmol')
+            ].to_numpy(dtype=float)
+            * M
         )
-        excess_flow = np.clip(bog_removed_flow - demand_aligned, 0.0, None)
-        bog_excess_kg = np.cumsum(excess_flow) * DT * M
+
+    else:
+        engine_demand = _align_engine_demand_to_results(
+            engine,
+            time_s,
+            system_key,
+        )
+        fuel_supplied = engine_demand.copy()
+        evaporator_flow = np.clip(
+            -res[
+                ('tank liq', 'flow')
+            ].to_numpy(dtype=float),
+            0.0,
+            None,
+        )
+        fuel_mode = np.where(
+            engine_demand > 0.0,
+            'LNG',
+            'conventional',
+        )
+        fuel_mode[0] = 'initial'
+        system_mode = fuel_mode.copy()
+        pbu_active = np.zeros(n, dtype=bool)
+
+        if ('BOG valve 1', 'gas_mol_flow') in res.columns:
+            bog_removed_flow = np.clip(
+                res[
+                    ('BOG valve 1', 'gas_mol_flow')
+                ].to_numpy(dtype=float),
+                0.0,
+                None,
+            )
+        else:
+            bog_removed_flow = np.clip(
+                -res[
+                    ('tank vap', 'flow')
+                ].to_numpy(dtype=float),
+                0.0,
+                None,
+            )
+
+        bog_used_flow = np.minimum(
+            bog_removed_flow,
+            np.clip(engine_demand, 0.0, None),
+        )
+        bog_excess_flow = np.clip(
+            bog_removed_flow - engine_demand,
+            0.0,
+            None,
+        )
+        bog_valve_active = bog_removed_flow > 0.0
+        cumulative_bog_excess_kg = (
+            np.cumsum(bog_excess_flow * time_step_s)
+            * M
+        )
+
+    engine_demand_kg_per_h = engine_demand * M * 3600.0
+    fuel_supplied_kg_per_h = fuel_supplied * M * 3600.0
+    liquid_fuel_kg_per_h = evaporator_flow * M * 3600.0
+    conventional_fuel = fuel_mode == 'conventional'
+    bog_removed_kg_per_h = bog_removed_flow * M * 3600.0
+    bog_used_kg_per_h = bog_used_flow * M * 3600.0
+    bog_excess_kg_per_h = bog_excess_flow * M * 3600.0
+    cumulative_bog_removed_kg = (
+        np.cumsum(bog_removed_flow * time_step_s) * M
+    )
+    cumulative_bog_used_kg = (
+        np.cumsum(bog_used_flow * time_step_s) * M
+    )
+
+    powers = _thermal_power_arrays(
+        res,
+        evaporator_flow_kmol_s=evaporator_flow,
+        superheater_flow_kmol_s=fuel_supplied,
+    )
+    cumulative_pbu_thermal_energy_kWh = np.cumsum(
+        powers['pbu_power_W'] * time_step_s
+    ) / 3.6e6
+    cumulative_evaporator_thermal_energy_kWh = np.cumsum(
+        powers['evaporator_power_W'] * time_step_s
+    ) / 3.6e6
+    cumulative_superheater_thermal_energy_kWh = np.cumsum(
+        powers['superheater_power_W'] * time_step_s
+    ) / 3.6e6
 
     profile = pd.DataFrame({
         'time_s': time_s,
         'day': day,
+        'time_step_s': time_step_s,
         'pressure_bar': pressure_bar,
         'fill_pct': fill_pct,
         'liquid_flow_kg_per_h': liquid_flow_kg_per_h,
-        'vapor_flow_kg_per_h': vapor_flow_kg_per_h,
-        'bog_excess_kg': bog_excess_kg,
+        'net_tank_vapor_flow_kg_per_h':
+            net_tank_vapor_flow_kg_per_h,
         'liquid_temperature_K': liquid_temperature_K,
         'vapor_temperature_K': vapor_temperature_K,
         'saturation_temperature_K': saturation_temperature_K,
+        'liquid_superheat_K': liquid_superheat_K,
         'vapor_quantity_kmol': vapor_quantity_kmol,
         'liquid_quantity_kmol': liquid_quantity_kmol,
-        'evaporation_per_step_kmol': evaporation_per_step_kmol,
-        'liquid_heat_gain_kJ': liquid_heat_gain_kJ,
-        'vapor_heat_gain_kJ': vapor_heat_gain_kJ,
-        'liquid_superheat_K': liquid_superheat_K,
+        'net_phase_change_kmol_per_step':
+            net_phase_change_kmol_per_step,
+        'liquid_heat_gain_kJ_per_step':
+            liquid_heat_gain_kJ_per_step,
+        'vapor_heat_gain_kJ_per_step':
+            vapor_heat_gain_kJ_per_step,
         'engine_demand_kg_per_h': engine_demand_kg_per_h,
+        'fuel_supplied_kg_per_h': fuel_supplied_kg_per_h,
+        'liquid_fuel_to_evaporator_kg_per_h':
+            liquid_fuel_kg_per_h,
+        'fuel_mode': fuel_mode,
+        'system_mode': system_mode,
         'conventional_fuel': conventional_fuel,
+        'pbu_active': pbu_active,
+        'bog_valve_or_compressor_active': bog_valve_active,
         'bog_removed_kg_per_h': bog_removed_kg_per_h,
-        'cumulative_bog_removed_kg': cumulative_bog_removed_kg,
+        'bog_used_kg_per_h': bog_used_kg_per_h,
+        'bog_excess_kg_per_h': bog_excess_kg_per_h,
+        'cumulative_bog_removed_kg':
+            cumulative_bog_removed_kg,
+        'cumulative_bog_used_kg': cumulative_bog_used_kg,
+        'cumulative_bog_excess_kg':
+            cumulative_bog_excess_kg,
+        'pbu_thermal_power_W': powers['pbu_power_W'],
+        'evaporator_evaporation_power_W':
+            powers['evaporator_evap_power_W'],
+        'evaporator_internal_superheat_power_W':
+            powers['evaporator_superheat_power_W'],
+        'evaporator_total_thermal_power_W':
+            powers['evaporator_power_W'],
+        'superheater_thermal_power_W':
+            powers['superheater_power_W'],
+        'cumulative_pbu_thermal_energy_kWh':
+            cumulative_pbu_thermal_energy_kWh,
+        'cumulative_evaporator_thermal_energy_kWh':
+            cumulative_evaporator_thermal_energy_kWh,
+        'cumulative_superheater_thermal_energy_kWh':
+            cumulative_superheater_thermal_energy_kWh,
+        'pbu_liquid_reynolds': (
+            res[('pbu lng', 'Re')].to_numpy(dtype=float)
+            if ('pbu lng', 'Re') in res.columns
+            else np.full(n, np.nan)
+        ),
     })
+
     out_csv.parent.mkdir(parents=True, exist_ok=True)
     profile.to_csv(out_csv, index=False)
-
 
 def run_case(system_key, params, profile_path=None):
     '''
@@ -340,54 +650,41 @@ def run_case(system_key, params, profile_path=None):
 
 
 def extract_metrics(system, engine, system_key):
-    '''
-    Derives the reported metrics from a finished system.calculate() run.
-
-    Metrics that are time-indexed series (pressure, BOG flow, pump/compressor
-    enthalpy rise) are truncated to the first-occurring "termination" event
-    (MAWP exceedance or the 5% minimum-heel threshold): the underlying
-    System_*_single.calculate() loops have no pressure-relief cutoff, so the
-    raw arrays keep going past a MAWP exceedance / do not stop exactly at the
-    heel threshold row; results beyond the termination point are not
-    physically admissible and are excluded here.
-
-    Exception: `bog_excess_kg` for the PBU system is `system.BOG_excess`, a
-    *scalar* accumulated by the model over the entire simulated profile. PBU
-    inserts extra pressurization sub-steps (see `not_working_times`) that
-    break the 1:1 row <-> engine.demand index alignment that would be needed
-    to reconstruct a truncated, time-resolved value, so for PBU it is
-    reported over the full simulated profile, not just up to the reported
-    termination point (for Pump/Compressor, where that alignment holds, the
-    truncated value is reconstructed exactly from BOG-removed vs. demand).
-    '''
+    """Derive admissible pressure, BOG and energy metrics."""
     res = system.results
     time_s = res[(' ', 'time')].to_numpy(dtype=float)
     days = time_s / 86400.0
+    time_step_s = np.diff(time_s, prepend=time_s[0])
     n = len(days)
 
-    fill_pct = res[('tank liq', 'vol_ratio')].to_numpy(dtype=float) * 100.0
+    fill_pct = (
+        res[('tank liq', 'vol_ratio')].to_numpy(dtype=float)
+        * 100.0
+    )
     fill_fraction = fill_pct / 100.0
-    pressure_bar = res[('tank com', 'pressure')].to_numpy(dtype=float) / 1.0e5
+    pressure_bar = (
+        res[('tank com', 'pressure')].to_numpy(dtype=float)
+        / 1.0e5
+    )
 
-    # --- time to minimum heel: first threshold crossing, NOT argmin over the
-    #     record (fill ratio can plateau/creep up during conventional-fuel
-    #     operation, so the smallest in-record value is not necessarily the
-    #     heel limit being reached) ---
-    heel_indices = np.flatnonzero(fill_fraction <= HEEL_FRACTION + HEEL_TOL)
-    heel_reached = bool(heel_indices.size)
+    heel_indices = np.flatnonzero(
+        fill_fraction <= HEEL_FRACTION + HEEL_TOL
+    )
     heel_detected = bool(heel_indices.size)
-    heel_index = int(heel_indices[0]) if heel_detected else None
-    time_to_min_heel_days = float(days[heel_index]) if heel_reached else float('nan')
+    heel_index = (
+        int(heel_indices[0])
+        if heel_detected
+        else None
+    )
 
-    # --- MAWP threshold crossing ---
     mawp_indices = np.flatnonzero(pressure_bar >= MAWP_BAR)
-    mawp_exceeded = bool(mawp_indices.size)
     mawp_detected = bool(mawp_indices.size)
-    mawp_index = int(mawp_indices[0]) if mawp_detected else None
-    time_to_mawp_days = float(days[mawp_index]) if mawp_exceeded else float('nan')
+    mawp_index = (
+        int(mawp_indices[0])
+        if mawp_detected
+        else None
+    )
 
-    # --- termination reason: whichever of {MAWP, minimum_heel} occurs first;
-    #     if neither occurs within the simulated profile -> profile_end ---
     if mawp_detected and (
         not heel_detected or mawp_index <= heel_index
     ):
@@ -408,96 +705,312 @@ def extract_metrics(system, engine, system_key):
         if heel_reached
         else float('nan')
     )
-
     time_to_mawp_days = (
         float(days[term_idx])
         if mawp_exceeded
         else float('nan')
     )
 
-    sl = slice(0, term_idx + 1)  # admissible window: up to (and incl.) termination
+    sl = slice(0, term_idx + 1)
     simulation_duration_days = float(days[term_idx])
     final_fill_pct = float(fill_pct[term_idx])
 
     max_pressure_bar = float(np.max(pressure_bar[sl]))
     pressure_at_termination_bar = float(pressure_bar[term_idx])
-    pressure_margin_to_mawp_bar = float(MAWP_BAR - max_pressure_bar)
-
-    # --- BOG removed from the tank (admissible window only) ---
-    if ('BOG valve 1', 'gas_mol_flow') in res.columns:
-        # PBU / Pump: BOG offtake goes through a dedicated BOG relief valve
-        bog_removed_flow = np.clip(res[('BOG valve 1', 'gas_mol_flow')].to_numpy(dtype=float), 0.0, None)
-    else:
-        # Compressor: BOG is drawn directly from the tank vapor space
-        bog_removed_flow = np.clip(-res[('tank vap', 'flow')].to_numpy(dtype=float), 0.0, None)
-    total_bog_removed_kg = float(np.sum(bog_removed_flow[sl])) * DT * M
+    pressure_margin_to_mawp_bar = float(
+        MAWP_BAR - max_pressure_bar
+    )
 
     if system_key == 'PBU':
-        # PBU excess BOG is available only as a full-profile scalar.
-        # Do not report it if the admissible simulation terminates at MAWP.
-        if termination_reason == 'MAWP':
-            bog_excess_kg = float('nan')
-        else:
-            bog_excess_kg = float(system.BOG_excess) * M
-    else:
-        # exact reconstruction: rows are 1:1 aligned with engine.demand for
-        # Pump/Compressor (no extra pressurization sub-steps), so we can
-        # reproduce system.BOG_excess's own criterion (demand < BOG removed)
-        # on the truncated window.
-        demand_arr = np.asarray(engine.demand, dtype=float)
-        demand_aligned = np.zeros(n)
-        demand_aligned[1:n] = demand_arr[1:n]
-        excess_flow = np.clip(bog_removed_flow - demand_aligned, 0.0, None)
-        bog_excess_kg = float(np.sum(excess_flow[sl])) * DT * M
-
-    if np.isfinite(bog_excess_kg):
-        raw_bog_used_kg = total_bog_removed_kg - bog_excess_kg
-
-        if raw_bog_used_kg < -BOG_BALANCE_TOL_KG:
-            raise RuntimeError(
-                f'{system_key}: inconsistent BOG balance: '
-                f'total removed = {total_bog_removed_kg:.2f} kg, '
-                f'excess = {bog_excess_kg:.2f} kg.'
+        required_operation_columns = [
+            ('operation', 'engine_demand_kmol_s'),
+            ('operation', 'fuel_supplied_kmol_s'),
+            ('operation', 'liquid_fuel_kmol_s'),
+            ('operation', 'fuel_mode'),
+            ('operation', 'bog_removed_kmol_s'),
+            ('operation', 'bog_used_kmol_s'),
+            ('operation', 'bog_excess_kmol_s'),
+        ]
+        missing = [
+            col for col in required_operation_columns
+            if col not in res.columns
+        ]
+        if missing:
+            raise KeyError(
+                f'PBU operating-log columns are missing: {missing}'
             )
 
-        bog_used_as_fuel_kg = max(raw_bog_used_kg, 0.0)
-        bog_balance_error_kg = (
-            total_bog_removed_kg
-            - bog_used_as_fuel_kg
-            - bog_excess_kg
+        demand_aligned = res[
+            ('operation', 'engine_demand_kmol_s')
+        ].to_numpy(dtype=float)
+        fuel_supplied = res[
+            ('operation', 'fuel_supplied_kmol_s')
+        ].to_numpy(dtype=float)
+        evaporator_flow = res[
+            ('operation', 'liquid_fuel_kmol_s')
+        ].to_numpy(dtype=float)
+        fuel_mode = res[
+            ('operation', 'fuel_mode')
+        ].astype(str).to_numpy()
+        bog_removed_flow = np.clip(
+            res[
+                ('operation', 'bog_removed_kmol_s')
+            ].to_numpy(dtype=float),
+            0.0,
+            None,
         )
+        bog_used_flow = np.clip(
+            res[
+                ('operation', 'bog_used_kmol_s')
+            ].to_numpy(dtype=float),
+            0.0,
+            None,
+        )
+        bog_excess_flow = np.clip(
+            res[
+                ('operation', 'bog_excess_kmol_s')
+            ].to_numpy(dtype=float),
+            0.0,
+            None,
+        )
+
     else:
-        bog_used_as_fuel_kg = float('nan')
-        bog_balance_error_kg = float('nan')
-            
-    # --- Pump energy (kWh); zero for PBU (no mechanical liquid pump) ---
+        demand_aligned = _align_engine_demand_to_results(
+            engine,
+            time_s,
+            system_key,
+        )
+        fuel_supplied = demand_aligned.copy()
+        evaporator_flow = np.clip(
+            -res[
+                ('tank liq', 'flow')
+            ].to_numpy(dtype=float),
+            0.0,
+            None,
+        )
+        fuel_mode = np.where(
+            demand_aligned > 0.0,
+            'LNG',
+            'conventional',
+        )
+        fuel_mode[0] = 'initial'
+
+        if ('BOG valve 1', 'gas_mol_flow') in res.columns:
+            bog_removed_flow = np.clip(
+                res[
+                    ('BOG valve 1', 'gas_mol_flow')
+                ].to_numpy(dtype=float),
+                0.0,
+                None,
+            )
+        else:
+            bog_removed_flow = np.clip(
+                -res[
+                    ('tank vap', 'flow')
+                ].to_numpy(dtype=float),
+                0.0,
+                None,
+            )
+
+        positive_demand = np.clip(
+            demand_aligned,
+            0.0,
+            None,
+        )
+        bog_used_flow = np.minimum(
+            bog_removed_flow,
+            positive_demand,
+        )
+        bog_excess_flow = np.clip(
+            bog_removed_flow - positive_demand,
+            0.0,
+            None,
+        )
+
+    total_bog_removed_kg = float(
+        np.sum(bog_removed_flow[sl] * time_step_s[sl])
+        * M
+    )
+    bog_used_as_fuel_kg = float(
+        np.sum(bog_used_flow[sl] * time_step_s[sl])
+        * M
+    )
+    bog_excess_kg = float(
+        np.sum(bog_excess_flow[sl] * time_step_s[sl])
+        * M
+    )
+    bog_balance_error_kg = (
+        total_bog_removed_kg
+        - bog_used_as_fuel_kg
+        - bog_excess_kg
+    )
+
+    if abs(bog_balance_error_kg) > BOG_BALANCE_TOL_KG:
+        raise RuntimeError(
+            f'{system_key}: inconsistent BOG balance: '
+            f'error = {bog_balance_error_kg:.2f} kg.'
+        )
+
+    lng_mask = fuel_mode == 'LNG'
+    conventional_mask = fuel_mode == 'conventional'
+
+    bog_removed_lng_kg = float(
+        np.sum(
+            bog_removed_flow[sl]
+            * time_step_s[sl]
+            * lng_mask[sl]
+        )
+        * M
+    )
+    bog_removed_conventional_kg = float(
+        np.sum(
+            bog_removed_flow[sl]
+            * time_step_s[sl]
+            * conventional_mask[sl]
+        )
+        * M
+    )
+    conventional_operation_days = float(
+        np.sum(
+            time_step_s[sl] * conventional_mask[sl]
+        )
+        / 86400.0
+    )
+    requested_fuel_kg = float(
+        np.sum(demand_aligned[sl] * time_step_s[sl]) * M
+    )
+
+    fuel_supplied_kg = float(
+        np.sum(fuel_supplied[sl] * time_step_s[sl]) * M
+    )
+
+    unserved_fuel_kg = max(
+        requested_fuel_kg - fuel_supplied_kg,
+        0.0,
+    )
+
     if ('pump', 'H_mol_in') in res.columns:
-        liq_flow = np.clip(-res[('tank liq', 'flow')].to_numpy(dtype=float), 0.0, None)  # kmol/s
-        dH_pump = (res[('pump', 'H_mol_out')].to_numpy(dtype=float) - res[('pump', 'H_mol_in')].to_numpy(dtype=float))  # kJ/kmol
-        pump_energy_kWh = float(np.sum((liq_flow * dH_pump)[sl])) * DT / 3600.0
+        liq_flow = np.clip(
+            -res[
+                ('tank liq', 'flow')
+            ].to_numpy(dtype=float),
+            0.0,
+            None,
+        )
+        dH_pump = (
+            res[
+                ('pump', 'H_mol_out')
+            ].to_numpy(dtype=float)
+            - res[
+                ('pump', 'H_mol_in')
+            ].to_numpy(dtype=float)
+        )
+        pump_energy_kWh = float(
+            np.sum(
+                liq_flow[sl]
+                * dH_pump[sl]
+                * time_step_s[sl]
+            )
+            / 3600.0
+        )
     else:
         pump_energy_kWh = 0.0
 
-    # --- Compressor energy (kWh); zero for PBU and Pump (no compressor) ---
     if ('compressor 1', 'H_mol_in') in res.columns:
-        vap_flow = np.clip(-res[('tank vap', 'flow')].to_numpy(dtype=float), 0.0, None)  # kmol/s
-        dH_comp = (res[('compressor 1', 'H_mol_out')].to_numpy(dtype=float) - res[('compressor 1', 'H_mol_in')].to_numpy(dtype=float))  # kJ/kmol
-        compressor_energy_kWh = float(np.sum((vap_flow * dH_comp)[sl])) * DT / 3600.0
+        vap_flow = np.clip(
+            -res[
+                ('tank vap', 'flow')
+            ].to_numpy(dtype=float),
+            0.0,
+            None,
+        )
+        dH_comp = (
+            res[
+                ('compressor 1', 'H_mol_out')
+            ].to_numpy(dtype=float)
+            - res[
+                ('compressor 1', 'H_mol_in')
+            ].to_numpy(dtype=float)
+        )
+        compressor_energy_kWh = float(
+            np.sum(
+                vap_flow[sl]
+                * dH_comp[sl]
+                * time_step_s[sl]
+            )
+            / 3600.0
+        )
     else:
         compressor_energy_kWh = 0.0
 
-    mechanical_energy_kWh = pump_energy_kWh + compressor_energy_kWh
+    mechanical_energy_kWh = (
+        pump_energy_kWh + compressor_energy_kWh
+    )
 
-    # PBU-only: total time spent in the low-pressure pressurization stall (the
-    # engine receives no fuel during this stall; see the `while` loop in
-    # System_Pbu_single.calculate). NaN for Pump/Compressor (no such stall).
+    if system_key != 'PBU' and fuel_supplied_kg > 0.0:
+        specific_mechanical_energy_kWh_per_t = (
+            mechanical_energy_kWh
+            / (fuel_supplied_kg / 1000.0)
+        )
+    else:
+        specific_mechanical_energy_kWh_per_t = float('nan')
+
+    powers = _thermal_power_arrays(
+        res,
+        evaporator_flow_kmol_s=evaporator_flow,
+        superheater_flow_kmol_s=fuel_supplied,
+    )
+    pbu_thermal_energy_kWh = float(
+        np.sum(
+            powers['pbu_power_W'][sl]
+            * time_step_s[sl]
+        )
+        / 3.6e6
+    )
+    evaporator_evaporation_energy_kWh = float(
+        np.sum(
+            powers['evaporator_evap_power_W'][sl]
+            * time_step_s[sl]
+        )
+        / 3.6e6
+    )
+    evaporator_internal_superheat_energy_kWh = float(
+        np.sum(
+            powers['evaporator_superheat_power_W'][sl]
+            * time_step_s[sl]
+        )
+        / 3.6e6
+    )
+    evaporator_thermal_energy_kWh = float(
+        np.sum(
+            powers['evaporator_power_W'][sl]
+            * time_step_s[sl]
+        )
+        / 3.6e6
+    )
+    superheater_thermal_energy_kWh = float(
+        np.sum(
+            powers['superheater_power_W'][sl]
+            * time_step_s[sl]
+        )
+        / 3.6e6
+    )
+    total_process_thermal_energy_kWh = (
+        pbu_thermal_energy_kWh
+        + evaporator_thermal_energy_kWh
+        + superheater_thermal_energy_kWh
+    )
+
     if hasattr(system, 'not_working_times'):
-        pbu_pressurization_time_days = float(np.sum(system.not_working_times)) / 86400.0
+        pbu_pressurization_time_days = (
+            float(np.sum(system.not_working_times))
+            / 86400.0
+        )
     else:
         pbu_pressurization_time_days = float('nan')
+
     if np.isfinite(time_to_min_heel_days):
         voyage_time_to_min_heel_days = time_to_min_heel_days
-
         if (
             system_key == 'PBU'
             and np.isfinite(pbu_pressurization_time_days)
@@ -514,21 +1027,47 @@ def extract_metrics(system, engine, system_key):
         'termination_reason': termination_reason,
         'heel_reached': heel_reached,
         'mawp_exceeded': mawp_exceeded,
+        'results_truncated_at_mawp': mawp_exceeded,
         'simulation_duration_days': simulation_duration_days,
         'time_to_min_heel_days': time_to_min_heel_days,
-        'voyage_time_to_min_heel_days': voyage_time_to_min_heel_days,
+        'voyage_time_to_min_heel_days':
+            voyage_time_to_min_heel_days,
         'time_to_mawp_days': time_to_mawp_days,
         'final_fill_pct': final_fill_pct,
         'max_pressure_bar': max_pressure_bar,
-        'pressure_at_termination_bar': pressure_at_termination_bar,
-        'pressure_margin_to_mawp_bar': pressure_margin_to_mawp_bar,
+        'pressure_at_termination_bar':
+            pressure_at_termination_bar,
+        'pressure_margin_to_mawp_bar':
+            pressure_margin_to_mawp_bar,
         'total_bog_removed_kg': total_bog_removed_kg,
         'bog_used_as_fuel_kg': bog_used_as_fuel_kg,
         'bog_excess_kg': bog_excess_kg,
+        'bog_removed_lng_kg': bog_removed_lng_kg,
+        'bog_removed_conventional_kg':
+            bog_removed_conventional_kg,
+        'conventional_operation_days':
+            conventional_operation_days,
+        'requested_fuel_kg': requested_fuel_kg,
+        'fuel_supplied_kg': fuel_supplied_kg,
+        'unserved_fuel_kg': unserved_fuel_kg,
         'pump_energy_kWh': pump_energy_kWh,
         'compressor_energy_kWh': compressor_energy_kWh,
         'mechanical_energy_kWh': mechanical_energy_kWh,
-        'pbu_pressurization_time_days': pbu_pressurization_time_days,
+        'specific_mechanical_energy_kWh_per_t':
+            specific_mechanical_energy_kWh_per_t,
+        'pbu_thermal_energy_kWh': pbu_thermal_energy_kWh,
+        'evaporator_evaporation_energy_kWh':
+            evaporator_evaporation_energy_kWh,
+        'evaporator_internal_superheat_energy_kWh':
+            evaporator_internal_superheat_energy_kWh,
+        'evaporator_thermal_energy_kWh':
+            evaporator_thermal_energy_kWh,
+        'superheater_thermal_energy_kWh':
+            superheater_thermal_energy_kWh,
+        'total_process_thermal_energy_kWh':
+            total_process_thermal_energy_kWh,
+        'pbu_pressurization_time_days':
+            pbu_pressurization_time_days,
         'bog_balance_error_kg': bog_balance_error_kg,
     }
 
@@ -579,6 +1118,7 @@ def run_oat_sensitivity(system_key, out_dir=None, save_time_profiles=True):
                 print(f"[{system_key}] running {pname} = {val} ({level}) ...")
                 case_profile_path = profiles_dir / f'{system_key}_dual_timeprofile_{pname}_{level}.csv' if save_time_profiles else None
                 metrics = run_case(system_key, params, profile_path=case_profile_path)
+
             rows.append({'parameter': pname, 'level': level, 'value': val, **metrics})
 
     df = pd.DataFrame(rows)
@@ -604,14 +1144,15 @@ def run_oat_sensitivity(system_key, out_dir=None, save_time_profiles=True):
 # ---------------------------------------------------------------------------
 # Publication-style tornado diagram (one figure per FGSS, 6 metric panels)
 # ---------------------------------------------------------------------------
-def plot_tornado(df, base_metrics, system_label, out_path, na_metrics=None, na_note='Not applicable for this FGSS'):
-    '''
-    `na_metrics`: optional set of METRICS_META keys that are structurally not
-    applicable for this system (e.g. `mechanical_energy_kWh` for PBU, which
-    has no rotating machinery and instead consumes thermal energy from the
-    glycol heating medium): the panel is drawn empty with an explanatory note
-    instead of a row of zero-width bars.
-    '''
+def plot_tornado(
+    df,
+    base_metrics,
+    system_label,
+    out_path,
+    na_metrics=None,
+    na_note='Not applicable for this FGSS',
+):
+    """Generate a six-panel OAT tornado diagram."""
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -619,6 +1160,13 @@ def plot_tornado(df, base_metrics, system_label, out_path, na_metrics=None, na_n
     from matplotlib.lines import Line2D
 
     na_metrics = set(na_metrics) if na_metrics else set()
+
+    metric_meta = OrderedDict(METRICS_META)
+    if system_label == 'PBU':
+        metric_meta.pop('mechanical_energy_kWh', None)
+        metric_meta['pbu_thermal_energy_kWh'] = (
+            'PBU thermal energy (kWh)'
+        )
 
     plt.rcParams.update({
         'font.family': 'serif',
@@ -630,18 +1178,39 @@ def plot_tornado(df, base_metrics, system_label, out_path, na_metrics=None, na_n
 
     color_low = '#4C72B0'
     color_high = '#DD8452'
+    mawp_hatch = '///'
 
-    metric_keys = list(METRICS_META.keys())
-    fig, axes = plt.subplots(2, 3, figsize=(14, 8))
+    metric_keys = list(metric_meta.keys())
+    fig, axes = plt.subplots(
+        2,
+        3,
+        figsize=(16, 8),
+        constrained_layout=True,
+    )
     axes = axes.ravel()
 
+    any_mawp = bool(
+        (df['termination_reason'] == 'MAWP').any()
+    )
+
     for ax, metric_key in zip(axes, metric_keys):
-        ax.set_title(METRICS_META[metric_key])
-        ax.set_xlabel(METRICS_META[metric_key])
+        metric_label = metric_meta[metric_key]
+        ax.set_title(metric_label)
+        ax.set_xlabel(metric_label)
 
         if metric_key in na_metrics:
-            ax.text(0.5, 0.5, na_note, transform=ax.transAxes, ha='center', va='center',
-                    fontsize=10, color='gray', style='italic', wrap=True)
+            ax.text(
+                0.5,
+                0.5,
+                na_note,
+                transform=ax.transAxes,
+                ha='center',
+                va='center',
+                fontsize=10,
+                color='gray',
+                style='italic',
+                wrap=True,
+            )
             ax.set_xticks([])
             ax.set_yticks([])
             for spine in ax.spines.values():
@@ -653,44 +1222,160 @@ def plot_tornado(df, base_metrics, system_label, out_path, na_metrics=None, na_n
         bars = []
         for pname, meta in PARAM_META.items():
             sub = df[df['parameter'] == pname]
-            low_val = sub.loc[sub['level'] == 'low', metric_key].iloc[0]
-            high_val = sub.loc[sub['level'] == 'high', metric_key].iloc[0]
-            bars.append((meta['label'], low_val, high_val))
+            low_row = sub.loc[sub['level'] == 'low'].iloc[0]
+            high_row = sub.loc[sub['level'] == 'high'].iloc[0]
+            bars.append({
+                'label': meta['label'],
+                'low': low_row[metric_key],
+                'high': high_row[metric_key],
+                'low_reason': low_row['termination_reason'],
+                'high_reason': high_row['termination_reason'],
+                'low_mawp_time': low_row['time_to_mawp_days'],
+                'high_mawp_time': high_row['time_to_mawp_days'],
+            })
 
-        # sort by sensitivity range (largest at top); NaN ranges (e.g. heel
-        # not reached within the simulated profile) sink to the bottom
-        bars.sort(key=lambda r: abs(r[2] - r[1]) if np.isfinite(r[2] - r[1]) else -1.0)
-        labels = [b[0] for b in bars]
-        lows = [b[1] for b in bars]
-        highs = [b[2] for b in bars]
+        def sensitivity_range(row):
+            difference = row['high'] - row['low']
+            return (
+                abs(difference)
+                if np.isfinite(difference)
+                else -1.0
+            )
 
+        bars.sort(key=sensitivity_range)
+        labels = [row['label'] for row in bars]
         y = np.arange(len(labels))
-        for yi, lo, hi in zip(y, lows, highs):
-            if not (np.isfinite(base_val) and np.isfinite(lo) and np.isfinite(hi)):
-                ax.text(0.02, yi, 'not reached before termination', transform=ax.get_yaxis_transform(),
-                        ha='left', va='center', fontsize=8, color='gray', style='italic', zorder=3)
-                continue
-            ax.barh(yi, lo - base_val, left=base_val, color=color_low, edgecolor='black', height=0.6, zorder=3)
-            ax.barh(yi, hi - base_val, left=base_val, color=color_high, edgecolor='black', height=0.6, zorder=3)
+
+        for yi, row in zip(y, bars):
+            notes = []
+
+            for level, value, color, reason, mawp_time in [
+                (
+                    'Low',
+                    row['low'],
+                    color_low,
+                    row['low_reason'],
+                    row['low_mawp_time'],
+                ),
+                (
+                    'High',
+                    row['high'],
+                    color_high,
+                    row['high_reason'],
+                    row['high_mawp_time'],
+                ),
+            ]:
+                if np.isfinite(base_val) and np.isfinite(value):
+                    ax.barh(
+                        yi,
+                        value - base_val,
+                        left=base_val,
+                        color=color,
+                        edgecolor='black',
+                        height=0.6,
+                        zorder=3,
+                        hatch=(
+                            mawp_hatch
+                            if reason == 'MAWP'
+                            else None
+                        ),
+                    )
+                elif reason == 'MAWP':
+                    if np.isfinite(mawp_time):
+                        notes.append(
+                            f'{level}: MAWP at {mawp_time:.2f} d'
+                        )
+                    else:
+                        notes.append(f'{level}: MAWP')
+                else:
+                    notes.append(
+                        f'{level}: not reached before termination'
+                    )
+
+            if notes:
+                ax.text(
+                    0.02,
+                    yi,
+                    '; '.join(notes),
+                    transform=ax.get_yaxis_transform(),
+                    ha='left',
+                    va='center',
+                    fontsize=7.5,
+                    color='gray',
+                    style='italic',
+                    zorder=5,
+                )
 
         if np.isfinite(base_val):
-            ax.axvline(base_val, color='black', linewidth=1.0, zorder=4)
+            ax.axvline(
+                base_val,
+                color='black',
+                linewidth=1.0,
+                zorder=4,
+            )
+
         ax.set_yticks(y)
         ax.set_yticklabels(labels, fontsize=9)
-        ax.grid(axis='x', linestyle='--', alpha=0.5, zorder=0)
+        ax.grid(
+            axis='x',
+            linestyle='--',
+            alpha=0.5,
+            zorder=0,
+        )
         ax.margins(y=0.15)
 
     handles = [
-        Patch(facecolor=color_low, edgecolor='black', label='Low level'),
-        Patch(facecolor=color_high, edgecolor='black', label='High level'),
-        Line2D([0], [0], color='black', linewidth=1.0, label='Baseline'),
+        Patch(
+            facecolor=color_low,
+            edgecolor='black',
+            label='Low level',
+        ),
+        Patch(
+            facecolor=color_high,
+            edgecolor='black',
+            label='High level',
+        ),
+        Line2D(
+            [0],
+            [0],
+            color='black',
+            linewidth=1.0,
+            label='Baseline',
+        ),
     ]
-    fig.legend(handles=handles, loc='lower center', ncol=3, frameon=False, bbox_to_anchor=(0.5, 0.0))
-    fig.suptitle(f'One-at-a-time sensitivity \u2014 {system_label} FGSS (dual fuel)', fontsize=13)
-    fig.tight_layout(rect=[0, 0.05, 1, 0.95])
+
+    if any_mawp:
+        handles.append(
+            Patch(
+                facecolor='white',
+                edgecolor='black',
+                hatch=mawp_hatch,
+                label='Value evaluated up to MAWP termination',
+            )
+        )
+
+    fig.legend(
+        handles=handles,
+        loc='lower center',
+        ncol=len(handles),
+        frameon=False,
+        bbox_to_anchor=(0.5, -0.02),
+    )
+    fig.suptitle(
+        f'One-at-a-time sensitivity — '
+        f'{system_label} FGSS (dual fuel)',
+        fontsize=13,
+    )
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=300)
+    fig.savefig(
+        out_path,
+        dpi=300,
+        bbox_inches='tight',
+    )
     plt.close(fig)
-    print(f"[{system_label}] tornado diagram saved to {out_path}")
+    print(
+        f'[{system_label}] tornado diagram saved to {out_path}'
+    )
+

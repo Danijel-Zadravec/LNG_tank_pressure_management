@@ -15,7 +15,10 @@ if str(ANALYSIS_DIR) not in sys.path:
 import sensitivity_common as sc
 
 NA_METRICS_BY_SYSTEM = {
-    'PBU': {'mechanical_energy_kWh'},
+    'PBU': {
+        'mechanical_energy_kWh',
+        'specific_mechanical_energy_kWh_per_t',
+    },
 }
 
 NA_NOTES_BY_SYSTEM = {

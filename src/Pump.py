@@ -78,14 +78,14 @@ class LngPump:
         self.save.save_states(self.states)
 
     def ne_radi(self):
-        self.T_in = 0
-        self.T_out = 0
-        self.p_in = 0
-        self.p_out = 0
-        self.H_mol_in =0.0
-        self.S_mol_in = 0.0
-        self.isentropic_H = 0.0
-        self.H_mol_out = 0.0
+        self.states.T_in = 0
+        self.states.T_out = 0
+        self.states.p_in = 0
+        self.states.p_out = 0
+        self.states.H_mol_in =0.0
+        self.states.S_mol_in = 0.0
+        self.states.isentropic_H = 0.0
+        self.states.H_mol_out = 0.0
         self.save.save_states(self.states)
 
 

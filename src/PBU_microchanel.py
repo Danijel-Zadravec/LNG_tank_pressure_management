@@ -86,7 +86,7 @@ class GlycolPBU():
 class CommonStatesPBU():
     def __init__(self):
         self.k = 1.0
-        self.heat_flow = 1.0
+        self.heat_flow = 0.01
         self.LMTD = 1.0
         self.heat_flow_LMTD = 0.0
 
@@ -200,37 +200,59 @@ class PBU():
         self.states.evap_glyc.alfa = alfa
 
     def calc_evap_alfaLiq_lng(self):
-         qm = self.states.evap_lng.mas_flow #kg/s
-         b = self.params.b #omjer stranica kanala,
-         An = self.params.An #površina nastrujavanja (poprečni presjek), m2
-         d_ekv = self.params.d_ekv #ekvivalentni promjer, m
-         ro = self.states.evap_lng.ro #gustoća glikola, kg/m3
-         nu = self.states.evap_lng.vis_cin #kinematička viskoznost glikola, m2/s
-         cp = self.states.evap_lng.cp
-         lmbd = self.states.evap_lng.l
-         aa=lmbd/ro/cp
-         w = qm / ro / An #brzina strujanja, m/s
-         Re = d_ekv * w / nu
-         self.states.evap_lng.Re = Re
-         assert (Re<10000.0), "Re < 10000 - samo ovaj model je implementiran za sad"
-         if Re < 1600.0:
-             Nu = 7.121 - 3.627*b + 1.145 * b**2 - 0.1689 * b**3 + 0.008464 * b**4
-             alfa = Nu * lmbd / d_ekv
-         elif Re < 3000.0:
-             Nu1 = 7.121 - 3.627*b + 1.145 * b**2 - 0.1689 * b**3 + 0.008464 * b**4
-             Pr = nu/aa
-             #print(Pr)
-             f = 1/((1.82*np.log10(3000.0)-1.64)**2)
-             Nu2 = (3000.0-1000)*Pr*(f/2.0)/(1+12.7*(Pr**(2/3)-1)*(f/2.0)**0.5)
-             Nu = Nu1 + (Nu2-Nu1)/(3000-1600)*(Re-1600.0)
-             alfa = Nu * lmbd / d_ekv
-         else:
-             Pr = nu/aa
-             print('veliki Re!')
-             f = 1/((1.82*np.log10(Re)-1.64)**2)
-             Nu = (Re-1000)*Pr*(f/2.0)/(1+12.7*(Pr**(2/3)-1)*(f/2.0)**0.5)
-         self.states.evap_lng.Nu = Nu
-         self.states.evap_lng.alfaLiq = alfa
+        qm = self.states.evap_lng.mas_flow #kg/s
+        b = self.params.b #omjer stranica kanala,
+        An = self.params.An #površina nastrujavanja (poprečni presjek), m2
+        d_ekv = self.params.d_ekv #ekvivalentni promjer, m
+        ro = self.states.evap_lng.ro #gustoća glikola, kg/m3
+        nu = self.states.evap_lng.vis_cin #kinematička viskoznost glikola, m2/s
+        cp = self.states.evap_lng.cp
+        lmbd = self.states.evap_lng.l
+        aa=lmbd/ro/cp
+        w = qm / ro / An #brzina strujanja, m/s
+        Re = d_ekv * w / nu
+        self.states.evap_lng.Re = Re
+        assert (Re<10000.0), "Re < 10000 - samo ovaj model je implementiran za sad"
+        if Re < 1600.0:
+            Nu = 7.121 - 3.627*b + 1.145 * b**2 - 0.1689 * b**3 + 0.008464 * b**4
+            alfa = Nu * lmbd / d_ekv
+        elif Re < 3000.0:
+            Nu1 = 7.121 - 3.627*b + 1.145 * b**2 - 0.1689 * b**3 + 0.008464 * b**4
+            Pr = nu/aa
+            #print(Pr)
+            f = 1/((1.82*np.log10(3000.0)-1.64)**2)
+            Nu2 = (3000.0-1000)*Pr*(f/2.0)/(1+12.7*(Pr**(2/3)-1)*(f/2.0)**0.5)
+            Nu = Nu1 + (Nu2-Nu1)/(3000-1600)*(Re-1600.0)
+            alfa = Nu * lmbd / d_ekv
+        else:
+            Pr = nu / aa
+
+            f = 1.0 / (
+                (1.82 * np.log10(Re) - 1.64) ** 2
+            )
+
+            Nu = (
+                (Re - 1000.0)
+                * Pr
+                * (f / 2.0)
+                / (
+                    1.0
+                    + 12.7
+                    * (Pr ** (2.0 / 3.0) - 1.0)
+                    * (f / 2.0) ** 0.5
+                )
+            )
+
+            alfa = Nu * lmbd / d_ekv
+            print(
+                'PBU state:',
+                'Re =', self.pbu.states.evap_lng.Re,
+                'flow =', self.pbu.states.evap_lng.mol_flow,
+                'T_in =', self.pbu.states.evap_lng.T_in,
+                'p =', self.pbu.states.evap_lng.p,
+            )
+        self.states.evap_lng.Nu = Nu
+        self.states.evap_lng.alfaLiq = alfa
 
 
     def calc_evap_alfa_lng(self):
