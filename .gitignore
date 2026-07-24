@@ -21,6 +21,7 @@ htmlcov/
 .env
 *.bak
 ~$*.docx
+/Systems_paper.docx
 
 # Large, reproducible simulation intermediates
 results/base_case/raw_model_results/
