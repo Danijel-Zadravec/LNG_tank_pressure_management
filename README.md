@@ -69,7 +69,6 @@ under `results/` are retained as reference outputs.
 - `scripts/analysis/`: base-case, sensitivity, figure, and table scripts.
 - `scripts/validation/`: tank pressurisation validation and source data.
 - `results/`: compact reference results used in the manuscript.
-- `Systems_paper.docx`: accompanying manuscript.
 
 Model and operating assumptions are defined in the configuration modules and
 near the top of the two analysis drivers. The tracked base-case manifest records

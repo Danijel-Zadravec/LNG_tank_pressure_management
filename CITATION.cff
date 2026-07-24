@@ -1,0 +1,29 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata below."
+title: "LNG Tank Pressure Management"
+abstract: >-
+  Research software for system-level analysis of LNG tank pressure management
+  in dual-fuel ships. The model compares pressure build-up, LNG pump, and
+  boil-off gas compressor configurations for low-pressure fuel gas supply
+  systems.
+authors:
+  - family-names: "Zadravec"
+    given-names: "Danijel"
+    affiliation: "University of Zagreb, Faculty of Mechanical Engineering and Naval Architecture, 10000 Zagreb, Croatia"
+    orcid: "https://orcid.org/0000-0002-9382-4855"
+version: "1.1.0"
+identifiers:
+  - type: doi
+    value: "10.5281/zenodo.20381640"
+    description: "Concept DOI representing all versions of the software"
+repository-code: "https://github.com/Danijel-Zadravec/LNG_tank_pressure_management"
+license: MIT
+type: software
+keywords:
+  - "liquefied natural gas"
+  - "LNG tank pressure management"
+  - "dual-fuel ships"
+  - "fuel gas supply systems"
+  - "boil-off gas"
+  - "system-level simulation"
+  - "Python"
