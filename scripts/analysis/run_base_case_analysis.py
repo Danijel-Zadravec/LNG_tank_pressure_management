@@ -14,9 +14,7 @@ The script performs the following tasks:
        - the complete raw system.results table with flattened column names;
        - one summary CSV containing all extracted performance indicators.
 
-3. Handles the dual-fuel base cases in one of two ways:
-       - default: reads the baseline rows from the final sensitivity CSV files;
-       - optional: re-runs all three dual-fuel base cases.
+3. Re-runs the three dual-fuel base cases over a fixed 10-day voyage window.
 
 4. Creates combined CSV files for manuscript revision:
        - LNG_base_case_summary.csv
@@ -25,9 +23,11 @@ The script performs the following tasks:
        - manuscript_base_case_table.csv
        - base_case_run_manifest.json
 
-The default setting does not repeat the dual-fuel simulations because their
-baseline cases were already calculated as part of the final sensitivity analysis.
-Set RERUN_DUAL_BASE_CASES = True to repeat and save them as well.
+The LNG simulations use a fixed six-day voyage window and the dual-fuel
+simulations use a fixed ten-day voyage window. For FGSS 1, pre-voyage PBU
+pressurization is performed before the voyage clock starts; therefore, elapsed
+simulation time may exceed the prescribed voyage duration by the startup time.
+FGSS 1 terminates earlier if the tank reaches the 5% minimum heel.
 
 Expected project structure
 --------------------------
@@ -45,7 +45,7 @@ project/
 ├── scripts/
 │   └── analysis/
 │       ├── sensitivity_common.py
-│       └── run_base_case_analysis.py
+│       └── run_base_case_analysis_fixed_windows.py
 └── results/
     ├── sensitivity/
     └── base_case/
@@ -61,7 +61,6 @@ from __future__ import annotations
 
 import importlib
 import json
-import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -92,11 +91,8 @@ import sensitivity_common as sc  # noqa: E402
 
 RUN_LNG_BASE_CASES = True
 
-# The final sensitivity CSV files already contain the corrected dual-fuel
-# baseline cases. Leave False unless a complete independent repetition is wanted.
-RERUN_DUAL_BASE_CASES = False
-
-MAX_PROFILE_DAYS = 20.0
+LNG_PROFILE_DAYS = 6.0
+DUAL_FUEL_PROFILE_DAYS = 10.0
 
 BASE_PARAMS = {
     "tank_ins_scale": 1.0,
@@ -110,14 +106,6 @@ TIMEPROFILE_DIR = RESULTS_DIR / "timeprofiles"
 RAW_RESULTS_DIR = RESULTS_DIR / "raw_model_results"
 SUMMARY_DIR = RESULTS_DIR / "summaries"
 
-SENSITIVITY_DIR = ROOT / "results" / "sensitivity"
-
-# Set an explicit path if automatic sensitivity-CSV detection is undesirable.
-DUAL_BASELINE_CSVS: dict[str, Path | None] = {
-    "PBU": None,
-    "Pump": None,
-    "Compressor": None,
-}
 
 SYSTEM_LABELS = {
     "PBU": "FGSS 1 (PBU)",
@@ -140,9 +128,33 @@ SYSTEM_FILE_LABELS = {
 # most decision-relevant pressure, BOG, and energy indicators.
 MANUSCRIPT_METRICS = [
     (
+        "planned_voyage_duration_days",
+        "Planned voyage duration",
+        "d",
+        1.0,
+    ),
+    (
+        "voyage_simulation_duration_days",
+        "Analysed voyage duration",
+        "d",
+        1.0,
+    ),
+    (
+        "simulation_duration_days",
+        "Elapsed simulation duration",
+        "d",
+        1.0,
+    ),
+    (
         "voyage_time_to_min_heel_days",
         "Voyage time to minimum heel",
         "d",
+        1.0,
+    ),
+    (
+        "final_fill_pct",
+        "Final tank filling",
+        "%",
         1.0,
     ),
     (
@@ -224,6 +236,18 @@ MANUSCRIPT_METRICS = [
         1.0,
     ),
     (
+        "requested_fuel_kg",
+        "Requested LNG fuel",
+        "kg",
+        1.0,
+    ),
+    (
+        "fuel_supplied_kg",
+        "Supplied LNG fuel",
+        "kg",
+        1.0,
+    ),
+    (
         "lng_supply_shortfall_kg",
         "LNG-supply shortfall",
         "kg",
@@ -238,7 +262,7 @@ MANUSCRIPT_METRICS = [
 
 def build_lng_engine(
     fuel_flow_scale: float = 1.0,
-    max_days: float = MAX_PROFILE_DAYS,
+    max_days: float = LNG_PROFILE_DAYS,
 ) -> sc.Engine:
     """
     Generate the repeated LNG-only operating profile.
@@ -493,6 +517,19 @@ def run_one_case(
         source="simulation",
     )
 
+    planned_voyage_duration_days = float(engine.times[-1]) / 86400.0
+    identified["planned_voyage_duration_days"] = (
+        planned_voyage_duration_days
+    )
+    actual_voyage_duration_days = float(
+        identified["voyage_simulation_duration_days"]
+    )
+    identified["completed_planned_window"] = bool(
+        actual_voyage_duration_days
+        >= planned_voyage_duration_days
+        - 1.5 * sc.DT / 86400.0
+    )
+
     pd.DataFrame([identified]).to_csv(
         summary_path,
         index=False,
@@ -501,127 +538,6 @@ def run_one_case(
     print(f"  Comprehensive time profile: {curated_path}")
     print(f"  Raw model results:          {raw_path}")
     print(f"  Summary:                    {summary_path}")
-
-    return identified
-
-
-# =============================================================================
-# DUAL-FUEL BASELINE EXTRACTION
-# =============================================================================
-
-def sensitivity_csv_version(
-    path: Path,
-    stem: str,
-) -> int:
-    match = re.fullmatch(
-        rf"{re.escape(stem)}(?:\((\d+)\))?\.csv",
-        path.name,
-    )
-    if not match:
-        return -1
-    return int(match.group(1) or 0)
-
-
-def is_valid_sensitivity_csv(
-    path: Path,
-) -> bool:
-    try:
-        preview = pd.read_csv(
-            path,
-            nrows=2,
-        )
-    except Exception:
-        return False
-
-    required = {
-        "parameter",
-        "level",
-        "termination_reason",
-        "max_pressure_bar",
-        "bog_excess_kg",
-    }
-    return required.issubset(preview.columns)
-
-
-def resolve_sensitivity_csv(
-    system_key: str,
-) -> Path:
-    explicit_path = DUAL_BASELINE_CSVS[system_key]
-
-    if explicit_path is not None:
-        path = explicit_path.expanduser().resolve()
-        if not path.is_file():
-            raise FileNotFoundError(path)
-        if not is_valid_sensitivity_csv(path):
-            raise ValueError(
-                f"Invalid sensitivity-result CSV: {path}"
-            )
-        return path
-
-    stem = f"{system_key}_dual_sensitivity_results"
-
-    candidates = [
-        path
-        for path in SENSITIVITY_DIR.glob(f"{stem}*.csv")
-        if is_valid_sensitivity_csv(path)
-    ]
-
-    if not candidates:
-        raise FileNotFoundError(
-            f"No valid file matching {stem}*.csv was found in "
-            f"{SENSITIVITY_DIR}"
-        )
-
-    # Prefer the richest and most recently modified valid export.
-    return max(
-        candidates,
-        key=lambda path: (
-            len(pd.read_csv(path, nrows=0).columns),
-            path.stat().st_mtime,
-            sensitivity_csv_version(path, stem),
-        ),
-    )
-
-
-def load_dual_baseline_from_sensitivity(
-    system_key: str,
-) -> dict[str, Any]:
-    csv_path = resolve_sensitivity_csv(
-        system_key,
-    )
-    data = pd.read_csv(csv_path)
-
-    baseline = data.loc[
-        data["parameter"].astype(str)
-        == "baseline"
-    ]
-
-    if len(baseline) != 1:
-        raise ValueError(
-            f"{csv_path.name} must contain exactly one baseline row."
-        )
-
-    metrics = baseline.iloc[0].to_dict()
-
-    for field in ("parameter", "level", "value"):
-        metrics.pop(field, None)
-
-    identified = add_identification_fields(
-        metrics=metrics,
-        profile="dual-fuel",
-        system_key=system_key,
-        source=str(csv_path),
-    )
-
-    summary_path = (
-        SUMMARY_DIR
-        / f"{SYSTEM_FILE_LABELS[system_key]}"
-        "_dual_fuel_summary_from_sensitivity.csv"
-    )
-    pd.DataFrame([identified]).to_csv(
-        summary_path,
-        index=False,
-    )
 
     return identified
 
@@ -791,9 +707,9 @@ def save_manifest(
         "project_root": str(ROOT),
         "settings": {
             "run_lng_base_cases": RUN_LNG_BASE_CASES,
-            "rerun_dual_base_cases":
-                RERUN_DUAL_BASE_CASES,
-            "max_profile_days": MAX_PROFILE_DAYS,
+            "lng_profile_days": LNG_PROFILE_DAYS,
+            "dual_fuel_profile_days": DUAL_FUEL_PROFILE_DAYS,
+            "pbu_startup_excluded_from_voyage_clock": True,
             "baseline_parameters": BASE_PARAMS,
             "time_step_s": sc.DT,
             "mawp_bar": sc.MAWP_BAR,
@@ -843,7 +759,7 @@ def main() -> None:
         ):
             engine = build_lng_engine(
                 fuel_flow_scale=1.0,
-                max_days=MAX_PROFILE_DAYS,
+                max_days=LNG_PROFILE_DAYS,
             )
             result = run_one_case(
                 system_key=system_key,
@@ -858,40 +774,22 @@ def main() -> None:
             "No LNG base-case summaries would be available."
         )
 
-    if RERUN_DUAL_BASE_CASES:
-        for system_key in (
-            "PBU",
-            "Pump",
-            "Compressor",
-        ):
-            engine = sc.build_engine(
-                fuel_flow_scale=1.0,
-                max_days=MAX_PROFILE_DAYS,
-            )
-            result = run_one_case(
-                system_key=system_key,
-                profile_key="dual-fuel",
-                engine=engine,
-            )
-            validate_summary_row(result)
-            dual_rows.append(result)
-    else:
-        print(
-            "\nUsing baseline rows from the final "
-            "dual-fuel sensitivity CSV files."
+    for system_key in (
+        "PBU",
+        "Pump",
+        "Compressor",
+    ):
+        engine = sc.build_engine(
+            fuel_flow_scale=1.0,
+            max_days=DUAL_FUEL_PROFILE_DAYS,
         )
-        for system_key in (
-            "PBU",
-            "Pump",
-            "Compressor",
-        ):
-            result = (
-                load_dual_baseline_from_sensitivity(
-                    system_key
-                )
-            )
-            validate_summary_row(result)
-            dual_rows.append(result)
+        result = run_one_case(
+            system_key=system_key,
+            profile_key="dual-fuel",
+            engine=engine,
+        )
+        validate_summary_row(result)
+        dual_rows.append(result)
 
     combined = save_combined_summaries(
         lng_rows=lng_rows,
