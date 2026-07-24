@@ -38,23 +38,19 @@ project/
 │   └── system_Compressor.py
 ├── src/
 │   ├── System_Pbu_single.py
-│   ├── System_Pbu.py
 │   ├── System_Pump_single.py
 │   ├── System_Compressor_single.py
 │   └── ...
 ├── scripts/
 │   └── analysis/
 │       ├── sensitivity_common.py
-│       └── run_base_case_analysis_fixed_windows.py
+│       └── run_base_case_analysis.py
 └── results/
     ├── sensitivity/
     └── base_case/
 
-Important
----------
-The current single-tank PBU configuration is created through
+The single-tank PBU configuration is created through
 configurations.system_PBU, which imports src.System_Pbu_single.
-src.System_Pbu is not used for this single-tank base-case runner.
 """
 
 from __future__ import annotations
@@ -704,7 +700,7 @@ def save_manifest(
         "created_utc": datetime.now(
             timezone.utc
         ).isoformat(),
-        "project_root": str(ROOT),
+        "project_root": ".",
         "settings": {
             "run_lng_base_cases": RUN_LNG_BASE_CASES,
             "lng_profile_days": LNG_PROFILE_DAYS,
@@ -724,7 +720,7 @@ def save_manifest(
             row.get("source")
             for row in dual_rows
         ],
-        "output_directory": str(RESULTS_DIR),
+        "output_directory": "results/base_case",
     }
 
     output_path = (

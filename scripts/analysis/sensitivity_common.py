@@ -35,17 +35,14 @@ bog_excess_kg (cumulative) -- is saved to its own CSV under
 results/sensitivity/timeprofiles/, for raw-data inspection / diagnosing any
 individual run (see `save_time_profile`).
 
-The three configuration factories used by PBU_dual.py, Pump_dual.py, and
-Compressor_dual.py are reused: the tank insulation / initial filling / ambient
-temperature parameters are varied by monkey-patching the corresponding
-module-level globals in the `configurations.system_*` modules right before
-calling their `create_system_*` factory function (these functions read the
-parameters from their module's globals at call time), so the underlying
-physical model stays identical to the base cases. The insulation parameter
-scales the insulation thermal conductivity `lmbd`, not the overall tank
-heat-transfer coefficients `k_liq`/`k_vap` directly (those are re-derived
-from the scaled conductivity using the same formula as the configuration
-modules).
+The configuration factories in `configurations.system_PBU`,
+`configurations.system_Pump`, and `configurations.system_Compressor` are reused.
+The tank insulation, initial filling, and ambient-temperature parameters are
+varied through the corresponding module-level settings immediately before each
+factory call. The insulation parameter scales the insulation thermal
+conductivity `lmbd`, rather than the overall tank heat-transfer coefficients
+`k_liq` and `k_vap`; those coefficients are re-derived using the same equations
+as the configuration modules.
 """
 import importlib
 import shutil

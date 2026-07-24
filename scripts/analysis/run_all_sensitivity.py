@@ -1,10 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-Convenience driver: runs the OAT sensitivity analysis and tornado diagram
-generation for all three dual-fuel FGSS (PBU, Pump, Compressor).
-
-NOTE: this script is prepared but intentionally not executed here.
-"""
+"""Run the dual-fuel OAT sensitivity analysis for all three FGSS designs."""
 import sys
 from pathlib import Path
 

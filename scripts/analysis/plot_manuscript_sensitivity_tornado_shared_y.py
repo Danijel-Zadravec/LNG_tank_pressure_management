@@ -1,18 +1,9 @@
 #!/usr/bin/env python3
 """
-Final manuscript tornado-plot script for the FGSS sensitivity analysis.
+Create the manuscript tornado figures from the FGSS sensitivity summaries.
 
-Main adjustments relative to the earlier version:
-- fixed parameter order in every panel and every figure
-  (Insulation, Initial filling, Ambient temperature, Fuel-demand scaling)
-- shorter parameter labels to avoid overlap
-- larger figure canvas and improved spacing
-- color palette aligned with the manuscript style
-  (blue / red with a neutral baseline line)
-- automatic hatching of MAWP-limited cases
-- robust CSV-file detection for both plain and '(n)' filenames
-
-The script creates one 2x2 tornado figure for each FGSS configuration.
+The script uses a fixed parameter order, marks MAWP-limited cases, and creates
+one 2x2 figure for each FGSS configuration.
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
 {
   "created_utc": "2026-07-23T14:57:14.445900+00:00",
-  "project_root": "C:\\Users\\faksD\\Documents\\GITHUB\\LNG_tank_pressure_management",
+  "project_root": ".",
   "settings": {
     "run_lng_base_cases": true,
     "lng_profile_days": 6.0,
@@ -26,5 +26,5 @@
     "simulation",
     "simulation"
   ],
-  "output_directory": "C:\\Users\\faksD\\Documents\\GITHUB\\LNG_tank_pressure_management\\results\\base_case"
+  "output_directory": "results/base_case"
 }
