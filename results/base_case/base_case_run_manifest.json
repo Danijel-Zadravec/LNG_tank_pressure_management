@@ -1,0 +1,30 @@
+{
+  "created_utc": "2026-07-23T14:57:14.445900+00:00",
+  "project_root": "C:\\Users\\faksD\\Documents\\GITHUB\\LNG_tank_pressure_management",
+  "settings": {
+    "run_lng_base_cases": true,
+    "lng_profile_days": 6.0,
+    "dual_fuel_profile_days": 10.0,
+    "pbu_startup_excluded_from_voyage_clock": true,
+    "baseline_parameters": {
+      "tank_ins_scale": 1.0,
+      "initial_fill": 0.83,
+      "T_amb": 293.15,
+      "fuel_flow_scale": 1.0
+    },
+    "time_step_s": 10.0,
+    "mawp_bar": 8.1,
+    "minimum_heel_fraction": 0.05
+  },
+  "lng_sources": [
+    "simulation",
+    "simulation",
+    "simulation"
+  ],
+  "dual_sources": [
+    "simulation",
+    "simulation",
+    "simulation"
+  ],
+  "output_directory": "C:\\Users\\faksD\\Documents\\GITHUB\\LNG_tank_pressure_management\\results\\base_case"
+}

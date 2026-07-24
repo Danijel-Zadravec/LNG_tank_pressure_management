@@ -53,35 +53,31 @@ engine = Engine(demands_inp[0:], pressures_inp[0:], temperatures_inp[0:], times_
 
 
 system_pbu.calculate(engine)
-#rezultati = system_pbu.results
 
-
-res_all_p = system_pbu.results
-res_all_p_head = res_all_p.head()
-times_used_p = res_all_p[' ']['time'].to_numpy()
-max_time_p = times_used_p[-1]
-
-times = times_used_p/60/60/24 #dan
-pressures = np.array(system_pbu.tank.save.common['pressure']) / 100000.0 #bar
-fill_pct = np.array(system_pbu.tank.save.liquid['vol_ratio']) *100 #%
-flow_liq = np.array(system_pbu.tank.save.liquid['flow'])* 16.04*3600 #kg/h
-flow_vap = np.array(system_pbu.tank.save.vapor['flow']) * 16.04*3600 #kg/h
-BOG_ex = system_pbu.BOG_excess*16.04
-
-# --- Save results to CSV
-BOG_ex = np.array(BOG_ex)
-df = pd.DataFrame({
-	'time_s': times_used_p,
-	'day': times,
-	'pressure_bar': pressures,
-	'fill_pct': fill_pct,
-	'liquid_flow_kg_per_h': flow_liq,
-	'vapor_flow_kg_per_h': flow_vap,
-	'bog_excess_kg': BOG_ex,
-})
+# Use the same row-aligned accounting and termination logic as the
+# sensitivity analysis.
+try:
+	from sensitivity_common import extract_metrics, save_time_profile
+except ImportError:
+	from scripts.analysis.sensitivity_common import (
+		extract_metrics,
+		save_time_profile,
+	)
 
 out_dir = ROOT / 'results'
 out_dir.mkdir(parents=True, exist_ok=True)
-out_file = out_dir / 'PBU_LNG_results.csv'
-df.to_csv(out_file, index=False)
-print(f"Saved results to {out_file}")
+
+timeprofile_file = out_dir / 'PBU_LNG_results.csv'
+summary_file = out_dir / 'PBU_LNG_summary.csv'
+
+save_time_profile(
+    system_pbu,
+    engine,
+    'PBU',
+    timeprofile_file,
+)
+metrics = extract_metrics(system_pbu, engine, 'PBU')
+pd.DataFrame([metrics]).to_csv(summary_file, index=False)
+
+print(f'Saved time profile to {timeprofile_file}')
+print(f'Saved summary metrics to {summary_file}')

@@ -159,7 +159,7 @@ PARAM_META = OrderedDict([
 ])
 
 METRICS_META = OrderedDict([
-    ('time_to_min_heel_days', 'Time to minimum heel (days)'),
+    ('voyage_time_to_min_heel_days', 'Voyage time to minimum heel (days)'),
     ('max_pressure_bar', 'Maximum tank pressure (bar)'),
     ('pressure_margin_to_mawp_bar', 'Minimum pressure margin to MAWP (bar)'),
     ('bog_excess_kg', 'Excess BOG requiring management (kg)'),
@@ -523,8 +523,18 @@ def save_time_profile(system, engine, system_key, out_csv):
 
     engine_demand_kg_per_h = engine_demand * M * 3600.0
     fuel_supplied_kg_per_h = fuel_supplied * M * 3600.0
+    lng_supply_shortfall_flow = np.clip(
+        engine_demand - fuel_supplied,
+        0.0,
+        None,
+    )
+    lng_supply_shortfall_kg_per_h = (
+        lng_supply_shortfall_flow * M * 3600.0
+    )
     liquid_fuel_kg_per_h = evaporator_flow * M * 3600.0
     conventional_fuel = fuel_mode == 'conventional'
+    startup = system_mode == 'PBU_prepressurization'
+    pressure_recovery = system_mode == 'PBU_pressure_recovery'
     bog_removed_kg_per_h = bog_removed_flow * M * 3600.0
     bog_used_kg_per_h = bog_used_flow * M * 3600.0
     bog_excess_kg_per_h = bog_excess_flow * M * 3600.0
@@ -533,6 +543,21 @@ def save_time_profile(system, engine, system_key, out_csv):
     )
     cumulative_bog_used_kg = (
         np.cumsum(bog_used_flow * time_step_s) * M
+    )
+    cumulative_requested_fuel_kg = (
+        np.cumsum(engine_demand * time_step_s) * M
+    )
+    cumulative_supplied_fuel_kg = (
+        np.cumsum(fuel_supplied * time_step_s) * M
+    )
+    cumulative_lng_supply_shortfall_kg = (
+        np.cumsum(
+            lng_supply_shortfall_flow * time_step_s
+        )
+        * M
+    )
+    cumulative_voyage_time_s = np.cumsum(
+        np.where(startup, 0.0, time_step_s)
     )
 
     powers = _thermal_power_arrays(
@@ -549,11 +574,18 @@ def save_time_profile(system, engine, system_key, out_csv):
     cumulative_superheater_thermal_energy_kWh = np.cumsum(
         powers['superheater_power_W'] * time_step_s
     ) / 3.6e6
+    cumulative_startup_pbu_thermal_energy_kWh = np.cumsum(
+        powers['pbu_power_W'] * time_step_s * startup
+    ) / 3.6e6
+    cumulative_operational_pbu_thermal_energy_kWh = np.cumsum(
+        powers['pbu_power_W'] * time_step_s * ~startup
+    ) / 3.6e6
 
     profile = pd.DataFrame({
         'time_s': time_s,
         'day': day,
         'time_step_s': time_step_s,
+        'voyage_time_s': cumulative_voyage_time_s,
         'pressure_bar': pressure_bar,
         'fill_pct': fill_pct,
         'liquid_flow_kg_per_h': liquid_flow_kg_per_h,
@@ -573,11 +605,21 @@ def save_time_profile(system, engine, system_key, out_csv):
             vapor_heat_gain_kJ_per_step,
         'engine_demand_kg_per_h': engine_demand_kg_per_h,
         'fuel_supplied_kg_per_h': fuel_supplied_kg_per_h,
+        'lng_supply_shortfall_kg_per_h':
+            lng_supply_shortfall_kg_per_h,
+        'cumulative_requested_fuel_kg':
+            cumulative_requested_fuel_kg,
+        'cumulative_supplied_fuel_kg':
+            cumulative_supplied_fuel_kg,
+        'cumulative_lng_supply_shortfall_kg':
+            cumulative_lng_supply_shortfall_kg,
         'liquid_fuel_to_evaporator_kg_per_h':
             liquid_fuel_kg_per_h,
         'fuel_mode': fuel_mode,
         'system_mode': system_mode,
         'conventional_fuel': conventional_fuel,
+        'pre_voyage_startup': startup,
+        'pressure_recovery': pressure_recovery,
         'pbu_active': pbu_active,
         'bog_valve_or_compressor_active': bog_valve_active,
         'bog_removed_kg_per_h': bog_removed_kg_per_h,
@@ -599,6 +641,10 @@ def save_time_profile(system, engine, system_key, out_csv):
             powers['superheater_power_W'],
         'cumulative_pbu_thermal_energy_kWh':
             cumulative_pbu_thermal_energy_kWh,
+        'cumulative_startup_pbu_thermal_energy_kWh':
+            cumulative_startup_pbu_thermal_energy_kWh,
+        'cumulative_operational_pbu_thermal_energy_kWh':
+            cumulative_operational_pbu_thermal_energy_kWh,
         'cumulative_evaporator_thermal_energy_kWh':
             cumulative_evaporator_thermal_energy_kWh,
         'cumulative_superheater_thermal_energy_kWh':
@@ -727,6 +773,7 @@ def extract_metrics(system, engine, system_key):
             ('operation', 'fuel_supplied_kmol_s'),
             ('operation', 'liquid_fuel_kmol_s'),
             ('operation', 'fuel_mode'),
+            ('operation', 'system_mode'),
             ('operation', 'bog_removed_kmol_s'),
             ('operation', 'bog_used_kmol_s'),
             ('operation', 'bog_excess_kmol_s'),
@@ -751,6 +798,9 @@ def extract_metrics(system, engine, system_key):
         ].to_numpy(dtype=float)
         fuel_mode = res[
             ('operation', 'fuel_mode')
+        ].astype(str).to_numpy()
+        system_mode = res[
+            ('operation', 'system_mode')
         ].astype(str).to_numpy()
         bog_removed_flow = np.clip(
             res[
@@ -794,6 +844,7 @@ def extract_metrics(system, engine, system_key):
             'conventional',
         )
         fuel_mode[0] = 'initial'
+        system_mode = fuel_mode.copy()
 
         if ('BOG valve 1', 'gas_mol_flow') in res.columns:
             bog_removed_flow = np.clip(
@@ -884,9 +935,17 @@ def extract_metrics(system, engine, system_key):
         np.sum(fuel_supplied[sl] * time_step_s[sl]) * M
     )
 
-    unserved_fuel_kg = max(
-        requested_fuel_kg - fuel_supplied_kg,
+    lng_supply_shortfall_flow = np.clip(
+        demand_aligned - fuel_supplied,
         0.0,
+        None,
+    )
+    lng_supply_shortfall_kg = float(
+        np.sum(
+            lng_supply_shortfall_flow[sl]
+            * time_step_s[sl]
+        )
+        * M
     )
 
     if ('pump', 'H_mol_in') in res.columns:
@@ -1001,27 +1060,54 @@ def extract_metrics(system, engine, system_key):
         + superheater_thermal_energy_kWh
     )
 
-    if hasattr(system, 'not_working_times'):
-        pbu_pressurization_time_days = (
-            float(np.sum(system.not_working_times))
+    startup_mask = system_mode == 'PBU_prepressurization'
+    pressure_recovery_mask = (
+        system_mode == 'PBU_pressure_recovery'
+    )
+
+    startup_time_days = float(
+        np.sum(time_step_s[sl] * startup_mask[sl])
+        / 86400.0
+    )
+    pressure_recovery_time_days = float(
+        np.sum(
+            time_step_s[sl]
+            * pressure_recovery_mask[sl]
+        )
+        / 86400.0
+    )
+    voyage_simulation_duration_days = float(
+        np.sum(time_step_s[sl] * ~startup_mask[sl])
+        / 86400.0
+    )
+
+    startup_pbu_thermal_energy_kWh = float(
+        np.sum(
+            powers['pbu_power_W'][sl]
+            * time_step_s[sl]
+            * startup_mask[sl]
+        )
+        / 3.6e6
+    )
+    operational_pbu_thermal_energy_kWh = (
+        pbu_thermal_energy_kWh
+        - startup_pbu_thermal_energy_kWh
+    )
+
+    elapsed_time_to_min_heel_days = time_to_min_heel_days
+    if heel_reached:
+        voyage_time_to_min_heel_days = float(
+            np.sum(
+                time_step_s[sl]
+                * ~startup_mask[sl]
+            )
             / 86400.0
         )
     else:
-        pbu_pressurization_time_days = float('nan')
-
-    if np.isfinite(time_to_min_heel_days):
-        voyage_time_to_min_heel_days = time_to_min_heel_days
-        if (
-            system_key == 'PBU'
-            and np.isfinite(pbu_pressurization_time_days)
-        ):
-            voyage_time_to_min_heel_days = max(
-                time_to_min_heel_days
-                - pbu_pressurization_time_days,
-                0.0,
-            )
-    else:
         voyage_time_to_min_heel_days = float('nan')
+
+    # Retained as an alias for compatibility with existing result files.
+    pbu_pressurization_time_days = startup_time_days
 
     return {
         'termination_reason': termination_reason,
@@ -1029,7 +1115,11 @@ def extract_metrics(system, engine, system_key):
         'mawp_exceeded': mawp_exceeded,
         'results_truncated_at_mawp': mawp_exceeded,
         'simulation_duration_days': simulation_duration_days,
+        'voyage_simulation_duration_days':
+            voyage_simulation_duration_days,
         'time_to_min_heel_days': time_to_min_heel_days,
+        'elapsed_time_to_min_heel_days':
+            elapsed_time_to_min_heel_days,
         'voyage_time_to_min_heel_days':
             voyage_time_to_min_heel_days,
         'time_to_mawp_days': time_to_mawp_days,
@@ -1049,13 +1139,19 @@ def extract_metrics(system, engine, system_key):
             conventional_operation_days,
         'requested_fuel_kg': requested_fuel_kg,
         'fuel_supplied_kg': fuel_supplied_kg,
-        'unserved_fuel_kg': unserved_fuel_kg,
+        'lng_supply_shortfall_kg':
+            lng_supply_shortfall_kg,
+        'unserved_fuel_kg': lng_supply_shortfall_kg,
         'pump_energy_kWh': pump_energy_kWh,
         'compressor_energy_kWh': compressor_energy_kWh,
         'mechanical_energy_kWh': mechanical_energy_kWh,
         'specific_mechanical_energy_kWh_per_t':
             specific_mechanical_energy_kWh_per_t,
         'pbu_thermal_energy_kWh': pbu_thermal_energy_kWh,
+        'startup_pbu_thermal_energy_kWh':
+            startup_pbu_thermal_energy_kWh,
+        'operational_pbu_thermal_energy_kWh':
+            operational_pbu_thermal_energy_kWh,
         'evaporator_evaporation_energy_kWh':
             evaporator_evaporation_energy_kWh,
         'evaporator_internal_superheat_energy_kWh':
@@ -1066,6 +1162,9 @@ def extract_metrics(system, engine, system_key):
             superheater_thermal_energy_kWh,
         'total_process_thermal_energy_kWh':
             total_process_thermal_energy_kWh,
+        'startup_time_days': startup_time_days,
+        'pressure_recovery_time_days':
+            pressure_recovery_time_days,
         'pbu_pressurization_time_days':
             pbu_pressurization_time_days,
         'bog_balance_error_kg': bog_balance_error_kg,

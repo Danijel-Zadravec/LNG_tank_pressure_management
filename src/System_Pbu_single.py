@@ -47,6 +47,8 @@ class SystemLNG_PBU:
         self.protok_super = super_flow
         self.protok_pbu = pbu_flow
         self.not_working_times = []
+        self.startup_time_s = 0.0
+        self.pressure_recovery_time_s = 0.0
         self.holding_time = None
         self.BOG_excess = 0.0
         self._reset_operation_log()
@@ -112,243 +114,362 @@ class SystemLNG_PBU:
             float(self.BOG_excess)
         )
 
+    def _run_pbu_no_fuel_step(
+        self,
+        dt,
+        glycol_temperature,
+        engine_demand,
+        fuel_mode,
+        system_mode,
+    ):
+        """Advance one PBU-only step without supplying LNG to the engine."""
+        p_tank = self.tank.states.common.pressure
+        T_tank_vap = self.tank.states.vapor.temperature
+        liquid_density = self.tank.states.liquid.density
+
+        # Equal valve pressures impose zero BOG flow during pressure build-up.
+        self.valve.calculate(
+            p_tank,
+            T_tank_vap,
+            p_tank,
+            liquid_density,
+        )
+
+        T_liq = self.tank.states.liquid.temperature
+        self.pbu.update_states(
+            T_liq,
+            p_tank,
+            glycol_temperature,
+            self.protok_pbu,
+        )
+
+        if self.tank.states.liquid.vol_ratio > MIN_HEEL_FRACTION:
+            pbu_flow = max(
+                float(self.pbu.states.evap_lng.mol_flow),
+                0.0,
+            )
+        else:
+            pbu_flow = 0.0
+
+        T_vap_return = self.pbu.states.evap_lng.T_sat
+        self.tank.update_states(
+            -pbu_flow,
+            pbu_flow,
+            -1,
+            T_vap_return,
+            dt,
+        )
+
+        p_updated = self.tank.states.common.pressure
+        self.thrvalve.no_flow(T_liq, p_updated)
+        self.pipe_pump_evap.no_flow(T_liq, p_updated)
+        self.evaporator.no_flow(
+            T_liq,
+            p_updated,
+            glycol_temperature,
+        )
+        self.pipe_evap_superh.no_flow(T_liq, p_updated)
+        self.superheater.no_flow(
+            T_liq,
+            p_updated,
+            glycol_temperature,
+        )
+        self.pipe_superh_engine.no_flow(T_liq, p_updated)
+
+        self._save_operation_row(
+            dt=dt,
+            engine_demand=max(float(engine_demand), 0.0),
+            fuel_supplied=0.0,
+            liquid_fuel=0.0,
+            fuel_mode=fuel_mode,
+            system_mode=system_mode,
+            pbu_active=True,
+            bog_valve_active=False,
+            bog_removed=0.0,
+            bog_used=0.0,
+            bog_excess=0.0,
+        )
+
     def calculate(self, engine):
 
         self.BOG_excess = 0.0
         self.not_working_times = []
+        self.startup_time_s = 0.0
+        self.pressure_recovery_time_s = 0.0
         self._reset_operation_log()
 
-        time_holding = 0.0
-
         self.engine = engine
-        times = self.engine.times
-        #print(times)
-        demand = self.engine.demand
-        temperature_glycol = self.engine.fuel_temperatures
-        pressures = self.engine.fuel_pressures
-        pbu_counter = 0
+        times = np.asarray(self.engine.times, dtype=float)
+        demand = np.asarray(self.engine.demand, dtype=float)
+        temperature_glycol = np.asarray(
+            self.engine.fuel_temperatures,
+            dtype=float,
+        )
+        pressures = np.asarray(
+            self.engine.fuel_pressures,
+            dtype=float,
+        )
+
+        if len(times) < 2:
+            raise ValueError(
+                'At least two engine-profile time points are required.'
+            )
+        if not (
+            len(times) == len(demand)
+            == len(temperature_glycol)
+            == len(pressures)
+        ):
+            raise ValueError(
+                'Engine time, demand, pressure, and temperature arrays '
+                'must have equal lengths.'
+            )
+
         pbu_state = False
-        pbu2_state = False
-
         bog_state = False
-        histereza = 0.0
+        hysteresis = 0.0
 
+        # ---------------------------------------------------------------
+        # One-time pre-voyage pressure build-up
+        # ---------------------------------------------------------------
+        positive_demand_indices = np.flatnonzero(demand > 0.0)
+        if positive_demand_indices.size:
+            startup_idx = int(positive_demand_indices[0])
+            dt_startup = float(times[1] - times[0])
+            pressure_evap_start = pressures[startup_idx] + 100.0
+            startup_pressure = (
+                pressure_evap_start + 150000.0 - 100.0
+            )
 
-        not_w = False
-        time_notw = 0.0 # ne radi zbog preniskog tlaka
-
-        for i in range(1,len(times)):
-            #print(i)
-            pressure_evap = pressures[i-1] + 100 #regulacija!
-            p_min_noflow = pressure_evap + 50000.0-100.0 # nema oduzimanja kapljevine - ne moze se ppostici protok
-            p_PBU_ON = pressure_evap + 50000.0 + 10000.0
-            p_pbu_max = pressure_evap + 150000.0 - 100.0 #do ovog tlaka radi PBU
-            p_BOG_on = pressure_evap + 160000.0 - 100.0 #odvođenje BOG iz spremnika - previsok tlak
-            p_BOG_off = pressure_evap + 100000.0 - 100.0
-            if i%1000 == 0:
-                print("               " + str(i) + "                    ")
-            dt = times[i] - times[i-1]
-            p_tank = self.tank.states.common.pressure
-
-
-            #print(tank_vap_flow)
-            end_success = True
-
-            tank_vol_ratio = self.tank.states.liquid.vol_ratio
-            #while (p_tank < p_min_noflow) and (p_tank2 < p_min_noflow): #prenizak tlak u oba
-
+            previous_pressure = self.tank.states.common.pressure
+            stagnant_steps = 0
 
             while (
-                p_tank <= p_min_noflow
-                and tank_vol_ratio > MIN_HEEL_FRACTION
+                self.tank.states.common.pressure < startup_pressure
+                and self.tank.states.liquid.vol_ratio
+                > MIN_HEEL_FRACTION
             ):
+                self._run_pbu_no_fuel_step(
+                    dt=dt_startup,
+                    glycol_temperature=(
+                        temperature_glycol[startup_idx]
+                    ),
+                    engine_demand=0.0,
+                    fuel_mode='pre_voyage',
+                    system_mode='PBU_prepressurization',
+                )
+                self.startup_time_s += dt_startup
 
-                if not not_w:
-                    time_notw = 0.0
-                    not_w = True
-
-                T_tankV = self.tank.states.vapor.temperature
-                pbu_counter = pbu_counter+1
-                print(pbu_counter)
-                # pustanje BOG - nema jer je tlak jako nizak
-                self.valve.calculate(p_tank, T_tankV,  p_tank, self.tank.states.liquid.density) #stavljen isti tlak tako da nema protoka
-
-                #PBU spremnik 1
-                T_liq_t = self.tank.states.liquid.temperature
-                self.pbu.update_states(T_liq_t, p_tank, temperature_glycol[i], self.protok_pbu)
-                if tank_vol_ratio > MIN_HEEL_FRACTION:
-                    pbu_flow = self.pbu.states.evap_lng.mol_flow
+                current_pressure = self.tank.states.common.pressure
+                if current_pressure <= previous_pressure + 1.0e-6:
+                    stagnant_steps += 1
                 else:
-                    pbu_flow = 0.0
+                    stagnant_steps = 0
+                previous_pressure = current_pressure
+
+                if stagnant_steps >= 100:
+                    raise RuntimeError(
+                        'PBU pre-pressurization did not increase tank '
+                        'pressure for 100 consecutive time steps.'
+                    )
+
+        # ---------------------------------------------------------------
+        # Voyage simulation
+        # ---------------------------------------------------------------
+        for i in range(1, len(times)):
+            pressure_evap = pressures[i - 1] + 100.0
+            p_min_noflow = pressure_evap + 50000.0 - 100.0
+            p_pbu_on = pressure_evap + 50000.0 + 10000.0
+            p_pbu_max = pressure_evap + 150000.0 - 100.0
+            p_bog_on = pressure_evap + 160000.0 - 100.0
+            p_bog_off = pressure_evap + 100000.0 - 100.0
+
+            if i % 1000 == 0:
+                print(f'               {i}                    ')
+
+            dt = float(times[i] - times[i - 1])
+            p_tank = self.tank.states.common.pressure
+            tank_vol_ratio = self.tank.states.liquid.vol_ratio
+            engine_demand = max(float(demand[i]), 0.0)
+
+            if tank_vol_ratio <= MIN_HEEL_FRACTION:
+                break
+
+            # If pressure becomes insufficient during the voyage, the
+            # voyage clock continues. The PBU recovers pressure while the
+            # corresponding LNG demand is recorded as a supply shortfall.
+            if p_tank <= p_min_noflow:
+                self._run_pbu_no_fuel_step(
+                    dt=dt,
+                    glycol_temperature=temperature_glycol[i],
+                    engine_demand=engine_demand,
+                    fuel_mode=(
+                        'LNG'
+                        if engine_demand > 0.0
+                        else 'conventional'
+                    ),
+                    system_mode='PBU_pressure_recovery',
+                )
+                self.pressure_recovery_time_s += dt
+                self.not_working_times.append(dt)
+                pbu_state = True
+                continue
+
+            if not (
+                tank_vol_ratio > MIN_HEEL_FRACTION + hysteresis
+                and p_tank >= p_min_noflow
+            ):
+                break
+
+            T_tank_vap = self.tank.states.vapor.temperature
+            hysteresis = 0.0
+
+            if p_tank < p_pbu_on:
+                pbu_state = True
+            elif p_tank > p_pbu_max:
+                pbu_state = False
+
+            if p_tank > p_bog_on:
+                bog_state = True
+            elif p_tank < p_bog_off:
+                bog_state = False
+
+            if bog_state:
+                self.valve.calculate(
+                    p_tank,
+                    T_tank_vap,
+                    pressure_evap,
+                    self.tank.states.liquid.density,
+                )
+            else:
+                self.valve.calculate(
+                    p_tank,
+                    T_tank_vap,
+                    p_tank,
+                    self.tank.states.liquid.density,
+                )
+
+            bog_removed_flow = max(
+                float(self.valve.states.gas_mol_flow),
+                0.0,
+            )
+            bog_used_flow = min(
+                bog_removed_flow,
+                engine_demand,
+            )
+            bog_excess_flow = max(
+                bog_removed_flow - engine_demand,
+                0.0,
+            )
+
+            tank_vap_flow = bog_removed_flow
+            tank_liq_flow = engine_demand - bog_used_flow
+            self.BOG_excess += bog_excess_flow * dt
+
+            tank_temperature = self.tank.states.liquid.temperature
+            if not pbu_state:
+                self.pbu.ne_radi()
+                self.tank.update_states(
+                    -tank_liq_flow,
+                    -tank_vap_flow,
+                    -1,
+                    -1,
+                    dt,
+                )
+            else:
+                self.pbu.update_states(
+                    tank_temperature,
+                    p_tank,
+                    temperature_glycol[i],
+                    self.protok_pbu,
+                )
+                pbu_flow = self.pbu.states.evap_lng.mol_flow
+                tank_vap_flow_tank = pbu_flow - tank_vap_flow
+                tank_liq_flow_tank = tank_liq_flow + pbu_flow
                 T_vap = self.pbu.states.evap_lng.T_sat
                 self.tank.update_states(
-                    -pbu_flow,
-                    pbu_flow,
+                    -tank_liq_flow_tank,
+                    tank_vap_flow_tank,
                     -1,
                     T_vap,
                     dt,
                 )
-                p_tank = self.tank.states.common.pressure
-                tank_vol_ratio = self.tank.states.liquid.vol_ratio
 
-                tank_T = T_liq_t
-                tank_p = p_tank
-                self.thrvalve.no_flow(tank_T, tank_p)
-                self.pipe_pump_evap.no_flow(tank_T, tank_p)
-                self.evaporator.no_flow(tank_T, tank_p, temperature_glycol[i])
-                self.pipe_evap_superh.no_flow(tank_T, tank_p)
-                self.superheater.no_flow(tank_T, tank_p, temperature_glycol[i])
-                self.pipe_superh_engine.no_flow(tank_T, tank_p)
+            self.thrvalve.calculate(
+                tank_temperature,
+                p_tank,
+                pressure_evap,
+            )
+            T_thrvalve = self.thrvalve.states.T_out
+            self.pipe_pump_evap.calculate(
+                T_thrvalve,
+                -1,
+                pressure_evap,
+                -1,
+                tank_liq_flow,
+            )
+            T_evap_in = self.pipe_pump_evap.states.T_out
+            self.evaporator.update_states(
+                T_evap_in,
+                T_evap_in + 50.0,
+                pressure_evap,
+                tank_liq_flow,
+                temperature_glycol[i],
+                self.protok_evap,
+            )
+            evap_T_out = self.evaporator.states.superh_lng.T_out
+            vapor_flow = engine_demand
+            T_mixer_out = evap_T_out
 
-                self._save_operation_row(
-                    dt=dt,
-                    engine_demand=max(float(demand[i]), 0.0),
-                    fuel_supplied=0.0,
-                    liquid_fuel=0.0,
-                    fuel_mode=(
-                        'LNG'
-                        if demand[i] > 0.0
-                        else 'conventional'
-                    ),
-                    system_mode='PBU_pressurization',
-                    pbu_active=True,
-                    bog_valve_active=False,
-                    bog_removed=0.0,
-                    bog_used=0.0,
-                    bog_excess=0.0,
-                )
+            self.pipe_evap_superh.calculate(
+                T_mixer_out,
+                -1,
+                pressure_evap,
+                -1,
+                vapor_flow,
+            )
+            T_in_superh = self.pipe_evap_superh.states.T_out
+            p_in_superh = self.pipe_evap_superh.states.p_out
+            self.superheater.update_states(
+                vapor_flow,
+                T_in_superh,
+                320.0,
+                p_in_superh,
+                self.protok_super,
+                temperature_glycol[i],
+            )
+            T_superh_out = self.superheater.states.lng.T_out
+            self.pipe_superh_engine.calculate(
+                T_superh_out,
+                -1,
+                p_in_superh,
+                -1,
+                vapor_flow,
+            )
 
-                time_notw += dt
-                if tank_vol_ratio <= MIN_HEEL_FRACTION:
-                    break
+            self._save_operation_row(
+                dt=dt,
+                engine_demand=engine_demand,
+                fuel_supplied=engine_demand,
+                liquid_fuel=tank_liq_flow,
+                fuel_mode=(
+                    'LNG'
+                    if engine_demand > 0.0
+                    else 'conventional'
+                ),
+                system_mode=(
+                    'LNG_supply'
+                    if engine_demand > 0.0
+                    else 'conventional_fuel'
+                ),
+                pbu_active=pbu_state,
+                bog_valve_active=(
+                    bog_state and bog_removed_flow > 0.0
+                ),
+                bog_removed=bog_removed_flow,
+                bog_used=bog_used_flow,
+                bog_excess=bog_excess_flow,
+            )
 
-            if not_w:
-                self.not_working_times = self.not_working_times + [time_notw]
-                not_w = False
-
-            tank_vol_ratio = self.tank.states.liquid.vol_ratio
-
-
-
-            if (
-                tank_vol_ratio > MIN_HEEL_FRACTION + histereza
-                and p_tank >= p_min_noflow
-            ):
-                T_tankV = self.tank.states.vapor.temperature
-                histereza = 0.0
-                if p_tank<p_PBU_ON:
-                    pbu_state = True
-                elif p_tank>p_pbu_max:
-                    pbu_state = False
-
-
-                if p_tank > p_BOG_on:
-                    bog_state = True
-                elif p_tank < p_BOG_off:
-                    bog_state = False
-
-
-
-                if bog_state:
-                    self.valve.calculate(p_tank, T_tankV, pressure_evap, self.tank.states.liquid.density)
-
-
-                else:
-                    self.valve.calculate(p_tank, T_tankV, p_tank, self.tank.states.liquid.density)
-
-                engine_demand = max(float(demand[i]), 0.0)
-
-                bog_removed_flow = max(
-                    float(self.valve.states.gas_mol_flow),
-                    0.0,
-                )
-                bog_used_flow = min(
-                    bog_removed_flow,
-                    engine_demand,
-                )
-                bog_excess_flow = max(
-                    bog_removed_flow - engine_demand,
-                    0.0,
-                )
-
-                tank_vap_flow = bog_removed_flow
-                tank_liq_flow = engine_demand - bog_used_flow
-                self.BOG_excess += bog_excess_flow * dt
-
-
-                #print(tank_liq_flow)
-                #assert tank_liq_flow >= 0.000005
-
-                tank_temperature = self.tank.states.liquid.temperature # temperatura prije odvođenja LNG K
-                if pbu_state == False:
-                    self.pbu.ne_radi()
-                    self.tank.update_states(-tank_liq_flow, -tank_vap_flow, -1, -1, dt)
-
-                else:
-                    self.pbu.update_states(
-                        tank_temperature,
-                        p_tank,
-                        temperature_glycol[i],
-                        self.protok_pbu,
-                    )
-                    pbu_flow = self.pbu.states.evap_lng.mol_flow
-                    tank_vap_flow_tank = pbu_flow - tank_vap_flow
-                    tank_liq_flow_tank = tank_liq_flow + pbu_flow
-                    T_vap = self.pbu.states.evap_lng.T_sat
-                    self.tank.update_states(-tank_liq_flow_tank, tank_vap_flow_tank, -1, T_vap, dt)
-
-
-
-                self.thrvalve.calculate(tank_temperature, p_tank, pressure_evap)
-                T_thrvalve =self.thrvalve.states.T_out
-                self.pipe_pump_evap.calculate(T_thrvalve, -1, pressure_evap, -1, tank_liq_flow)
-                T_evap_in =self.pipe_pump_evap.states.T_out
-                self.evaporator.update_states(T_evap_in, T_evap_in+50, pressure_evap, tank_liq_flow, temperature_glycol[i], self.protok_evap)
-                evap_T_out = self.evaporator.states.superh_lng.T_out
-                valve_T = self.valve.states.T_out
-                vapor_flow = engine_demand
-                T_mixer_out = evap_T_out
-
-                self.pipe_evap_superh.calculate(T_mixer_out, -1, pressure_evap, -1, vapor_flow)
-                T_in_superh = self.pipe_evap_superh.states.T_out
-                p_in_superh = self.pipe_evap_superh.states.p_out
-                self.superheater.update_states(vapor_flow, T_in_superh, 320.0, p_in_superh, self.protok_super, temperature_glycol[i])
-                T_superh_out = self.superheater.states.lng.T_out
-                self.pipe_superh_engine.calculate(
-                    T_superh_out,
-                    -1,
-                    p_in_superh,
-                    -1,
-                    vapor_flow,
-                )
-
-                self._save_operation_row(
-                    dt=dt,
-                    engine_demand=engine_demand,
-                    fuel_supplied=engine_demand,
-                    liquid_fuel=tank_liq_flow,
-                    fuel_mode=(
-                        'LNG'
-                        if engine_demand > 0.0
-                        else 'conventional'
-                    ),
-                    system_mode=(
-                        'LNG_supply'
-                        if engine_demand > 0.0
-                        else 'conventional_fuel'
-                    ),
-                    pbu_active=pbu_state,
-                    bog_valve_active=(
-                        bog_state and bog_removed_flow > 0.0
-                    ),
-                    bog_removed=bog_removed_flow,
-                    bog_used=bog_used_flow,
-                    bog_excess=bog_excess_flow,
-                )
-
-            else:
-                end_success = False
-                break
         self.results = pd.DataFrame({
             'time': np.asarray(
                 self.result_time_s,
@@ -356,7 +477,6 @@ class SystemLNG_PBU:
             )
         })
         self.save_results()
-
 
 
     def save_results(self):

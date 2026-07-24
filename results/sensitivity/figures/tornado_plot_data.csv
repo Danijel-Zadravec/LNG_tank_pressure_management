@@ -1,0 +1,49 @@
+system,metric,parameter,label,baseline,low_value,high_value,low_mawp,high_mawp,low_note,high_note,impact
+FGSS 1 (PBU),voyage_time_to_min_heel_days,T_amb,Ambient temperature,9.499189814814814,9.874537037037037,9.488888888888887,False,False,,,0.3753472222222225
+FGSS 1 (PBU),voyage_time_to_min_heel_days,tank_ins_scale,"Insulation conductivity, $\lambda/\lambda_0$",9.499189814814814,10.074537037037038,9.292708333333334,False,False,,,0.5753472222222236
+FGSS 1 (PBU),voyage_time_to_min_heel_days,initial_fill,Initial tank filling,9.499189814814814,7.598263888888889,10.772337962962965,False,False,,,1.9009259259259252
+FGSS 1 (PBU),voyage_time_to_min_heel_days,fuel_flow_scale,Fuel-demand scaling,9.499189814814814,12.05601851851852,7.125810185185185,False,False,,,2.5568287037037063
+FGSS 1 (PBU),pressure_margin_to_mawp_bar,initial_fill,Initial tank filling,0.4998645266425301,0.4997882072479926,0.4998852075935183,False,False,,,7.631939453750514e-05
+FGSS 1 (PBU),pressure_margin_to_mawp_bar,fuel_flow_scale,Fuel-demand scaling,0.4998645266425301,0.4999423771458708,0.4999803768899662,False,False,,,0.00011585024743610006
+FGSS 1 (PBU),pressure_margin_to_mawp_bar,T_amb,Ambient temperature,0.4998645266425301,0.4997263289998255,0.4999070726904877,False,False,,,0.00013819764270461832
+FGSS 1 (PBU),pressure_margin_to_mawp_bar,tank_ins_scale,"Insulation conductivity, $\lambda/\lambda_0$",0.4998645266425301,0.499885997892882,0.4180075774277343,False,False,,,0.0818569492147958
+FGSS 1 (PBU),bog_excess_kg,T_amb,Ambient temperature,4.994889761988155,4.814931069094914,5.0443172165938375,False,False,,,0.17995869289324062
+FGSS 1 (PBU),bog_excess_kg,tank_ins_scale,"Insulation conductivity, $\lambda/\lambda_0$",4.994889761988155,2.069938199580967,4.979641814319031,False,False,,,2.924951562407188
+FGSS 1 (PBU),bog_excess_kg,fuel_flow_scale,Fuel-demand scaling,4.994889761988155,3.503515622804519,0.07460598058149434,False,False,,,4.920283781406661
+FGSS 1 (PBU),bog_excess_kg,initial_fill,Initial tank filling,4.994889761988155,0.0,5.381378438012465,False,False,,,4.994889761988155
+FGSS 1 (PBU),pbu_thermal_energy_kWh,T_amb,Ambient temperature,690.6485683411007,698.6917318608625,615.9770098288628,False,False,,,74.67155851223788
+FGSS 1 (PBU),pbu_thermal_energy_kWh,initial_fill,Initial tank filling,690.6485683411007,615.8642923308344,668.7241148632685,False,False,,,74.78427601026635
+FGSS 1 (PBU),pbu_thermal_energy_kWh,fuel_flow_scale,Fuel-demand scaling,690.6485683411007,597.9381833558318,701.4885846840947,False,False,,,92.71038498526889
+FGSS 1 (PBU),pbu_thermal_energy_kWh,tank_ins_scale,"Insulation conductivity, $\lambda/\lambda_0$",690.6485683411007,988.9492660009438,555.0434251454017,False,False,,,298.3006976598431
+FGSS 2 (Pump),voyage_time_to_min_heel_days,T_amb,Ambient temperature,10.04074074074074,10.07974537037037,10.00162037037037,False,False,,,0.03912037037036953
+FGSS 2 (Pump),voyage_time_to_min_heel_days,tank_ins_scale,"Insulation conductivity, $\lambda/\lambda_0$",10.04074074074074,10.19386574074074,9.44039351851852,False,False,,,0.6003472222222186
+FGSS 2 (Pump),voyage_time_to_min_heel_days,initial_fill,Initial tank filling,10.04074074074074,7.617361111111111,10.882407407407408,False,False,,,2.423379629629628
+FGSS 2 (Pump),voyage_time_to_min_heel_days,fuel_flow_scale,Fuel-demand scaling,10.04074074074074,12.188657407407408,7.1469907407407405,False,False,,,2.893749999999999
+FGSS 2 (Pump),pressure_margin_to_mawp_bar,T_amb,Ambient temperature,0.7321936086906726,0.9185954081190512,0.5402138941367634,False,False,,,0.19197971455390928
+FGSS 2 (Pump),pressure_margin_to_mawp_bar,initial_fill,Initial tank filling,0.7321936086906726,2.1351131932700307,0.793865942895291,False,False,,,1.402919584579358
+FGSS 2 (Pump),pressure_margin_to_mawp_bar,tank_ins_scale,"Insulation conductivity, $\lambda/\lambda_0$",0.7321936086906726,2.4968494281710507,0.0459921924438493,False,False,,,1.764655819480378
+FGSS 2 (Pump),pressure_margin_to_mawp_bar,fuel_flow_scale,Fuel-demand scaling,0.7321936086906726,0.793682454159403,2.811708363649368,False,False,,,2.079514754958695
+FGSS 2 (Pump),bog_excess_kg,T_amb,Ambient temperature,3.673239259249278,2.5407848348111197,4.802933255596873,False,False,,,1.1324544244381585
+FGSS 2 (Pump),bog_excess_kg,tank_ins_scale,"Insulation conductivity, $\lambda/\lambda_0$",3.673239259249278,0.0,4.7838205106819345,False,False,,,3.673239259249278
+FGSS 2 (Pump),bog_excess_kg,initial_fill,Initial tank filling,3.673239259249278,0.0,2.18352619211813,False,False,,,3.673239259249278
+FGSS 2 (Pump),bog_excess_kg,fuel_flow_scale,Fuel-demand scaling,3.673239259249278,0.7596916630229138,0.0,False,False,,,3.673239259249278
+FGSS 2 (Pump),pump_energy_kWh,T_amb,Ambient temperature,77.3100633803743,82.111425655971,72.16939675974425,False,False,,,5.140666620630057
+FGSS 2 (Pump),pump_energy_kWh,initial_fill,Initial tank filling,77.3100633803743,69.23719789864117,82.96786820545385,False,False,,,8.072865481733132
+FGSS 2 (Pump),pump_energy_kWh,fuel_flow_scale,Fuel-demand scaling,77.3100633803743,64.0161767416459,84.72571351374344,False,False,,,13.293886638728395
+FGSS 2 (Pump),pump_energy_kWh,tank_ins_scale,"Insulation conductivity, $\lambda/\lambda_0$",77.3100633803743,97.94968616011816,58.332670896975024,False,False,,,20.63962277974386
+FGSS 3 (Compressor),voyage_time_to_min_heel_days,T_amb,Ambient temperature,10.224421296296295,10.220601851851852,10.211226851851851,False,False,,,0.013194444444444287
+FGSS 3 (Compressor),voyage_time_to_min_heel_days,tank_ins_scale,"Insulation conductivity, $\lambda/\lambda_0$",10.224421296296295,10.242592592592592,9.59722222222222,False,True,,MAWP,0.6271990740740758
+FGSS 3 (Compressor),voyage_time_to_min_heel_days,initial_fill,Initial tank filling,10.224421296296295,7.657060185185185,10.995949074074074,False,False,,,2.5673611111111105
+FGSS 3 (Compressor),voyage_time_to_min_heel_days,fuel_flow_scale,Fuel-demand scaling,10.224421296296295,12.355787037037038,7.172685185185185,False,False,,,3.0517361111111105
+FGSS 3 (Compressor),pressure_margin_to_mawp_bar,T_amb,Ambient temperature,3.095829299572813,3.040757392909228,2.2013503284362708,False,False,,,0.8944789711365422
+FGSS 3 (Compressor),pressure_margin_to_mawp_bar,initial_fill,Initial tank filling,3.095829299572813,5.825900776447075,4.247112163840697,False,False,,,2.7300714768742624
+FGSS 3 (Compressor),pressure_margin_to_mawp_bar,fuel_flow_scale,Fuel-demand scaling,3.095829299572813,4.910152475563022,5.907402004900078,False,False,,,2.811572705327265
+FGSS 3 (Compressor),pressure_margin_to_mawp_bar,tank_ins_scale,"Insulation conductivity, $\lambda/\lambda_0$",3.095829299572813,4.696112057241098,-0.0003516013259492,False,True,,,3.096180900898762
+FGSS 3 (Compressor),bog_used_as_fuel_kg,T_amb,Ambient temperature,17.364583200000002,15.4364148,17.5089432,False,False,,,1.9281684000000023
+FGSS 3 (Compressor),bog_used_as_fuel_kg,initial_fill,Initial tank filling,17.364583200000002,14.951365200000003,20.475541200000002,False,False,,,3.110958
+FGSS 3 (Compressor),bog_used_as_fuel_kg,fuel_flow_scale,Fuel-demand scaling,17.364583200000002,26.425098000000006,13.046294400000004,False,False,,,9.060514800000004
+FGSS 3 (Compressor),bog_used_as_fuel_kg,tank_ins_scale,"Insulation conductivity, $\lambda/\lambda_0$",17.364583200000002,6.549613200000001,16.630272,False,True,,,10.81497
+FGSS 3 (Compressor),mechanical_energy_kWh,T_amb,Ambient temperature,821.152579241638,754.0766342000405,759.5478207510369,False,False,,,67.07594504159749
+FGSS 3 (Compressor),mechanical_energy_kWh,initial_fill,Initial tank filling,821.152579241638,711.9158081329448,895.4898564338091,False,False,,,109.23677110869323
+FGSS 3 (Compressor),mechanical_energy_kWh,fuel_flow_scale,Fuel-demand scaling,821.152579241638,1072.134868305796,657.0906641471148,False,False,,,250.98228906415807
+FGSS 3 (Compressor),mechanical_energy_kWh,tank_ins_scale,"Insulation conductivity, $\lambda/\lambda_0$",821.152579241638,359.71510635258124,506.6444029581775,False,True,,,461.4374728890568
